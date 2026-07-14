@@ -6,19 +6,98 @@ const os = require('os');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
+const { OAuth2Client } = require('google-auth-library');
 const { pool, initializeDatabase } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || 'expenso_gateway_default_jwt_secret_fallback_12345';
+const JWT_SECRET = process.env.JWT_SECRET;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 
-if (!process.env.JWT_SECRET) {
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
+
+if (!JWT_SECRET) {
   console.warn("WARNING: JWT_SECRET environment variable is not defined. Using insecure fallback secret.");
 }
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+
+// Helper: Get Client IP
+function getClientIp(req) {
+  return req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
+}
+
+// Endpoint: POST /login/google
+app.post('/login/google', async (req, res) => {
+  const { id_token, device_model, device_manufacturer } = req.body;
+
+  if (!id_token) {
+    return res.status(400).json({ message: "Google ID token required" });
+  }
+
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: id_token,
+      audience: GOOGLE_CLIENT_ID,
+    });
+
+    const payload = ticket.getPayload();
+    const email = payload.email;
+    const name = payload.name;
+    const googleId = payload.sub;
+    const ipAddress = getClientIp(req);
+    // Simple location placeholder (would usually need a GeoIP service)
+    const location = req.headers['x-vercel-ip-city'] || req.headers['cf-ipcity'] || 'Unknown';
+
+    // Check if user exists by email
+    let userResult = await pool.query("SELECT * FROM users WHERE email = $1", [email.toLowerCase()]);
+    let user;
+
+    if (userResult.rows.length === 0) {
+      // Auto-register new Google user
+      const userId = crypto.randomUUID();
+      const username = `google_${googleId.substring(0, 8)}`;
+      const partnerShareCode = generatePartnerCode();
+      const timestamp = new Date();
+
+      const insertResult = await pool.query(
+        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, ip_address, location, device_model, device_manufacturer, created_at, updated_at, last_login)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, username, email, display_name, partner_share_code, created_at, updated_at`,
+        [userId, username, email.toLowerCase(), name, 'GOOGLE_AUTH_EXTERNAL', partnerShareCode, ipAddress, location, device_model, device_manufacturer, timestamp, timestamp, timestamp]
+      );
+      user = insertResult.rows[0];
+    } else {
+      user = userResult.rows[0];
+      // Update last login and device info
+      const timestamp = new Date();
+      await pool.query(
+        "UPDATE users SET last_login = $1, ip_address = $2, location = $3, device_model = $4, device_manufacturer = $5 WHERE id = $6",
+        [timestamp, ipAddress, location, device_model, device_manufacturer, user.id]
+      );
+    }
+
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
+
+    res.status(200).json({
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        display_name: user.display_name,
+        partner_share_code: user.partner_share_code,
+        created_at: user.created_at,
+        updated_at: user.updated_at
+      }
+    });
+
+  } catch (err) {
+    console.error("Google Login Error:", err);
+    res.status(401).json({ message: "Invalid Google ID token" });
+  }
+});
 
 // Helper: Generate invitation share code
 function generatePartnerCode() {
@@ -49,9 +128,27 @@ function authenticateToken(req, res, next) {
   });
 }
 
+// Admin Authentication Middleware (God User)
+function authenticateGodToken(req, res, next) {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) {
+    return res.status(401).json({ message: "Admin access token required" });
+  }
+
+  jwt.verify(token, JWT_SECRET || 'fallback', (err, decoded) => {
+    if (err || decoded.role !== 'god') {
+      return res.status(403).json({ message: "Forbidden: Admin access only" });
+    }
+    req.godUser = decoded;
+    next();
+  });
+}
+
 // Endpoint: POST /register
 app.post('/register', async (req, res) => {
-  const { username, email, password, display_name } = req.body;
+  const { username, email, password, display_name, device_model, device_manufacturer } = req.body;
 
   if (!username || !email || !password || !display_name) {
     return res.status(400).json({ message: "All fields are required" });
@@ -76,15 +173,17 @@ app.post('/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const partnerShareCode = generatePartnerCode();
     const timestamp = new Date();
+    const ipAddress = getClientIp(req);
+    const location = req.headers['x-vercel-ip-city'] || req.headers['cf-ipcity'] || 'Unknown';
 
     const result = await pool.query(
-      `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at, last_login)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id, username, email, display_name, partner_share_code, created_at, updated_at`,
-      [userId, username.trim().toLowerCase(), email.trim().toLowerCase(), display_name.trim(), passwordHash, partnerShareCode, timestamp, timestamp, timestamp]
+      `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, ip_address, location, device_model, device_manufacturer, created_at, updated_at, last_login)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, username, email, display_name, partner_share_code, created_at, updated_at`,
+      [userId, username.trim().toLowerCase(), email.trim().toLowerCase(), display_name.trim(), passwordHash, partnerShareCode, ipAddress, location, device_model, device_manufacturer, timestamp, timestamp, timestamp]
     );
 
     const newUser = result.rows[0];
-    const token = jwt.sign({ id: newUser.id, username: newUser.username }, JWT_SECRET, { expiresIn: '30d' });
+    const token = jwt.sign({ id: newUser.id, username: newUser.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
     res.status(201).json({
       token,
@@ -107,7 +206,7 @@ app.post('/register', async (req, res) => {
 
 // Endpoint: POST /login
 app.post('/login', async (req, res) => {
-  const { identifier, password } = req.body;
+  const { identifier, password, device_model, device_manufacturer } = req.body;
 
   if (!identifier || !password) {
     return res.status(400).json({ message: "Identifier and password required" });
@@ -130,11 +229,17 @@ app.post('/login', async (req, res) => {
       return res.status(400).json({ message: "Invalid username/email or password" });
     }
 
-    // Update last login
+    // Update last login and device info
     const timestamp = new Date();
-    await pool.query("UPDATE users SET last_login = $1 WHERE id = $2", [timestamp, user.id]);
+    const ipAddress = getClientIp(req);
+    const location = req.headers['x-vercel-ip-city'] || req.headers['cf-ipcity'] || 'Unknown';
 
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
+    await pool.query(
+      "UPDATE users SET last_login = $1, ip_address = $2, location = $3, device_model = $4, device_manufacturer = $5 WHERE id = $6",
+      [timestamp, ipAddress, location, device_model, device_manufacturer, user.id]
+    );
+
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
     res.status(200).json({
       token,
@@ -408,6 +513,73 @@ app.get("/api/info", (req, res) => {
     },
     database: process.env.DATABASE_URL ? "Connected (Neon)" : "Demo Mode (Disconnected)"
   });
+});
+
+app.post('/api/god/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ message: "Username and password required" });
+  }
+  try {
+    if (!process.env.DATABASE_URL) {
+      // Demo mode fallback authentication
+      if (username === 'admin' && password === '00000000-0000-0000-0000-000000000000') {
+        const token = jwt.sign({ id: 'demo-admin-id', username: 'admin', role: 'god' }, JWT_SECRET || 'fallback', { expiresIn: '1d' });
+        return res.json({ token });
+      } else {
+        return res.status(401).json({ message: "Invalid admin credentials (Demo Mode: use admin/00000000-0000-0000-0000-000000000000)" });
+      }
+    }
+
+    const result = await pool.query('SELECT * FROM "godUser" WHERE "super_user" = $1', [username.trim()]);
+    if (result.rows.length === 0) {
+      return res.status(401).json({ message: "Invalid admin credentials" });
+    }
+    const god = result.rows[0];
+    
+    // UUID comparison as string equality (direct text auth check)
+    const passwordMatch = password.trim().toLowerCase() === String(god.authenticate).toLowerCase();
+    if (!passwordMatch) {
+      return res.status(401).json({ message: "Invalid admin credentials" });
+    }
+
+    const token = jwt.sign({ id: god.id, username: god.super_user, role: 'god' }, JWT_SECRET || 'fallback', { expiresIn: '1d' });
+    res.json({ token });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error during admin authentication" });
+  }
+});
+
+app.get('/api/god/users', authenticateGodToken, async (req, res) => {
+  try {
+    if (!process.env.DATABASE_URL) {
+      // Return mock users in demo mode
+      return res.json({
+        users: [
+          { username: "john_doe", device_model: "iPhone 15 Pro", device_manufacturer: "Apple", updated_at: new Date().toISOString() },
+          { username: "alice_w", device_model: "Galaxy S24 Ultra", device_manufacturer: "Samsung", updated_at: new Date().toISOString() },
+          { username: "bob_smith", device_model: "Pixel 8 Pro", device_manufacturer: "Google", updated_at: new Date().toISOString() }
+        ]
+      });
+    }
+
+    const result = await pool.query(
+      "SELECT username, device_model, device_manufacturer, updated_at FROM users ORDER BY updated_at DESC"
+    );
+    res.json({ users: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error retrieving user records" });
+  }
+});
+
+app.get("/login", (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'login.html'));
+});
+
+app.get("/dashboard", (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
 });
 
 app.get("/", (req, res) => {
