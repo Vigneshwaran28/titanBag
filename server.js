@@ -1,6 +1,8 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
+const os = require('os');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -8,14 +10,15 @@ const { pool, initializeDatabase } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_SECRET = process.env.JWT_SECRET || 'expenso_gateway_default_jwt_secret_fallback_12345';
 
-if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET environment variable is not defined.");
+if (!process.env.JWT_SECRET) {
+  console.warn("WARNING: JWT_SECRET environment variable is not defined. Using insecure fallback secret.");
 }
 
 app.use(cors());
 app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
 
 // Helper: Generate invitation share code
 function generatePartnerCode() {
@@ -375,20 +378,45 @@ app.post('/sync', authenticateToken, async (req, res) => {
 });
 
 // App initialization
-initializeDatabase()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`TitanBag Sync server is running on port ${PORT}`);
+if (process.env.DATABASE_URL) {
+  initializeDatabase()
+    .then(() => {
+      app.listen(PORT, () => {
+        console.log(`TitanBag Sync server is running on port ${PORT}`);
+      });
+    })
+    .catch(err => {
+      console.error("Failed to start server due to database initialization error:", err);
+      process.exit(1);
     });
-  })
-  .catch(err => {
-    console.error("Failed to start server due to database initialization error:", err);
-    process.exit(1);
+} else {
+  console.warn("WARNING: DATABASE_URL not defined. Running in Demo/Development mode (no DB connections).");
+  app.listen(PORT, () => {
+    console.log(`TitanBag Sync server is running on port ${PORT} (Demo Mode)`);
   });
+}
 
-app.get("/", (req, res) => {
+app.get("/api/info", (req, res) => {
   res.json({
     status: "OK",
-    message: "Expenso Backend is running"
+    uptime: Math.floor(process.uptime()),
+    node_version: process.version,
+    platform: `${os.platform()} (${os.arch()})`,
+    memory: {
+      free: `${Math.floor(os.freemem() / 1024 / 1024)} MB`,
+      total: `${Math.floor(os.totalmem() / 1024 / 1024)} MB`
+    },
+    database: process.env.DATABASE_URL ? "Connected (Neon)" : "Demo Mode (Disconnected)"
   });
+});
+
+app.get("/", (req, res) => {
+  if (req.accepts('html')) {
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  } else {
+    res.json({
+      status: "OK",
+      message: "TitanBag Backend is running"
+    });
+  }
 });

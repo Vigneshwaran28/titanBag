@@ -1,0 +1,1314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TitanBag API Gateway & Status Dashboard</title>
+  <meta name="description" content="Status dashboard and API documentation explorer for TitanBag Sync Backend.">
+  
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  
+  <!-- Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    :root {
+      --bg-dark: #07090e;
+      --bg-card: #0f131a;
+      --bg-card-hover: #141a24;
+      --border-color: #1e2633;
+      --border-glow: #312e81;
+      --text-primary: #f3f4f6;
+      --text-secondary: #9ca3af;
+      --text-muted: #6b7280;
+      
+      --color-primary: #6366f1;
+      --color-primary-glow: rgba(99, 102, 241, 0.15);
+      --color-success: #10b981;
+      --color-success-glow: rgba(16, 185, 129, 0.15);
+      --color-get: #a855f7;
+      --color-post: #3b82f6;
+      --color-delete: #ef4444;
+      
+      --font-outfit: 'Outfit', sans-serif;
+      --font-inter: 'Inter', sans-serif;
+      --font-mono: 'Fira Code', monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-primary);
+      font-family: var(--font-inter);
+      line-height: 1.5;
+      overflow-x: hidden;
+      position: relative;
+    }
+
+    /* Animated background gradients */
+    body::before {
+      content: '';
+      position: absolute;
+      top: -10%;
+      left: -10%;
+      width: 50%;
+      height: 60%;
+      background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, transparent 70%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    body::after {
+      content: '';
+      position: absolute;
+      bottom: -10%;
+      right: -10%;
+      width: 50%;
+      height: 60%;
+      background: radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, transparent 70%);
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem 1.5rem;
+    }
+
+    /* Navbar / Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 2rem;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 3rem;
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-icon {
+      background: linear-gradient(135deg, var(--color-primary), #8b5cf6);
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+    }
+
+    .logo-icon i {
+      color: white;
+      font-size: 1.25rem;
+    }
+
+    .logo-text {
+      font-family: var(--font-outfit);
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(to right, #ffffff, #a5b4fc);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .status-pill {
+      background: var(--color-success-glow);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--color-success);
+      padding: 0.5rem 1rem;
+      border-radius: 9999px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: var(--font-outfit);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      background-color: var(--color-success);
+      border-radius: 50%;
+      display: inline-block;
+      box-shadow: 0 0 10px var(--color-success);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+      }
+      70% {
+        transform: scale(1);
+        box-shadow: 0 0 0 6px rgba(16, 185, 129, 0);
+      }
+      100% {
+        transform: scale(0.95);
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+      }
+    }
+
+    /* Grid Layout */
+    .dashboard-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2rem;
+    }
+
+    @media (min-width: 1024px) {
+      .dashboard-grid {
+        grid-template-columns: 1.2fr 0.8fr;
+      }
+    }
+
+    /* Cards */
+    .card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 1.75rem;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .card:hover {
+      border-color: rgba(99, 102, 241, 0.4);
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+      transform: translateY(-2px);
+    }
+
+    .card:hover::before {
+      opacity: 1;
+    }
+
+    .card-title {
+      font-family: var(--font-outfit);
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    /* Hero / Status Section */
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+
+    @media (min-width: 640px) {
+      .hero-stats {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    .stat-box {
+      background: rgba(30, 38, 51, 0.4);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1rem;
+      text-align: center;
+    }
+
+    .stat-label {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 0.25rem;
+    }
+
+    .stat-value {
+      font-family: var(--font-outfit);
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .stat-value.highlight {
+      color: var(--color-primary);
+    }
+
+    /* API Endpoint List */
+    .endpoints-section {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .endpoint-item {
+      border: 1px solid var(--border-color);
+      background-color: rgba(15, 19, 26, 0.6);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: all 0.25s ease;
+    }
+
+    .endpoint-item:hover {
+      border-color: rgba(99, 102, 241, 0.3);
+      background-color: var(--bg-card-hover);
+    }
+
+    .endpoint-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 1.25rem;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .endpoint-badge-path {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .badge {
+      font-family: var(--font-outfit);
+      font-size: 0.75rem;
+      font-weight: 700;
+      padding: 0.25rem 0.6rem;
+      border-radius: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      display: inline-block;
+    }
+
+    .badge.get {
+      background-color: rgba(168, 85, 247, 0.15);
+      color: var(--color-get);
+      border: 1px solid rgba(168, 85, 247, 0.3);
+    }
+
+    .badge.post {
+      background-color: rgba(59, 130, 246, 0.15);
+      color: var(--color-post);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .badge.delete {
+      background-color: rgba(239, 68, 68, 0.15);
+      color: var(--color-delete);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+    }
+
+    .endpoint-path {
+      font-family: var(--font-mono);
+      font-size: 0.9rem;
+      color: var(--text-primary);
+      font-weight: 500;
+    }
+
+    .endpoint-summary {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+      margin-left: 1rem;
+      display: none;
+    }
+
+    @media (min-width: 640px) {
+      .endpoint-summary {
+        display: inline;
+      }
+    }
+
+    .expand-icon {
+      color: var(--text-muted);
+      transition: transform 0.2s ease;
+    }
+
+    .endpoint-item.open .expand-icon {
+      transform: rotate(180deg);
+      color: var(--color-primary);
+    }
+
+    .endpoint-details {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s cubic-bezier(0, 1, 0, 1); /* Quick slide transition */
+      border-top: 1px solid transparent;
+      padding: 0 1.25rem;
+      background-color: rgba(7, 9, 14, 0.4);
+    }
+
+    .endpoint-item.open .endpoint-details {
+      max-height: 2000px;
+      padding: 1.25rem;
+      border-top: 1px solid var(--border-color);
+      transition: max-height 0.5s ease-in-out;
+    }
+
+    .endpoint-desc {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      margin-bottom: 1.25rem;
+    }
+
+    /* Tabs inside detail view */
+    .tab-container {
+      margin-top: 1rem;
+    }
+
+    .tab-header {
+      display: flex;
+      gap: 0.5rem;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 0.75rem;
+    }
+
+    .tab-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      padding: 0.5rem 0.75rem;
+      cursor: pointer;
+      font-size: 0.8rem;
+      font-weight: 500;
+      border-bottom: 2px solid transparent;
+      transition: all 0.2s;
+    }
+
+    .tab-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .tab-btn.active {
+      color: var(--color-primary);
+      border-bottom-color: var(--color-primary);
+    }
+
+    .tab-pane {
+      display: none;
+    }
+
+    .tab-pane.active {
+      display: block;
+    }
+
+    .code-block-wrapper {
+      position: relative;
+    }
+
+    .btn-copy {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      background: rgba(30, 38, 51, 0.8);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      color: var(--text-secondary);
+      padding: 0.25rem 0.5rem;
+      cursor: pointer;
+      font-size: 0.75rem;
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+      transition: all 0.2s;
+      z-index: 10;
+    }
+
+    .btn-copy:hover {
+      background: var(--color-primary);
+      color: white;
+      border-color: var(--color-primary);
+    }
+
+    pre {
+      background-color: #07090e;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 1rem;
+      overflow-x: auto;
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: #a5b4fc;
+    }
+
+    /* Live Tester Console */
+    .tester-section {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .btn-test {
+      background: linear-gradient(135deg, var(--color-primary), #8b5cf6);
+      color: white;
+      border: none;
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      font-weight: 600;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(99, 102, 241, 0.2);
+    }
+
+    .btn-test:hover {
+      box-shadow: 0 6px 18px rgba(99, 102, 241, 0.4);
+      transform: translateY(-1px);
+    }
+
+    .console-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+    }
+
+    .console-status {
+      display: flex;
+      align-items: center;
+      gap: 0.25rem;
+    }
+
+    .console-status-dot {
+      width: 6px;
+      height: 6px;
+      background-color: var(--color-success);
+      border-radius: 50%;
+    }
+
+    /* Visual Diagram */
+    .diagram-container {
+      margin-top: 2rem;
+      background: rgba(15, 19, 26, 0.5);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .diagram-title {
+      font-family: var(--font-outfit);
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .flow-diagram {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1.5rem;
+      width: 100%;
+      flex-wrap: wrap;
+    }
+
+    .flow-node {
+      background: rgba(30, 38, 51, 0.6);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 1rem;
+      text-align: center;
+      min-width: 130px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+      position: relative;
+    }
+
+    .flow-node i {
+      color: var(--color-primary);
+      font-size: 1.5rem;
+    }
+
+    .flow-node.db i {
+      color: #00cae3;
+    }
+
+    .flow-node span {
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .flow-arrow {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+
+    .flow-arrow i {
+      animation: bounce-right 1.5s infinite;
+    }
+
+    @keyframes bounce-right {
+      0%, 100% { transform: translateX(0); }
+      50% { transform: translateX(5px); }
+    }
+
+    /* Footer */
+    footer {
+      text-align: center;
+      padding-top: 3rem;
+      margin-top: 5rem;
+      border-top: 1px solid var(--border-color);
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    footer a {
+      color: var(--color-primary);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+
+    /* JSON highlighting classes */
+    .json-key { color: #f43f5e; }
+    .json-value-string { color: #34d399; }
+    .json-value-number { color: #fbbf24; }
+    .json-value-boolean { color: #3b82f6; }
+    .json-value-null { color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo-container">
+        <div class="logo-icon">
+          <i data-lucide="package-open"></i>
+        </div>
+        <div>
+          <h1 class="logo-text">TitanBag API Gateway</h1>
+        </div>
+      </div>
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        <span>GATEWAY OPERATIONAL</span>
+      </div>
+    </header>
+
+    <div class="dashboard-grid">
+      <!-- Left Column: API endpoints doc -->
+      <div>
+        <div class="card" style="margin-bottom: 2rem;">
+          <h2 class="card-title">
+            <i data-lucide="activity" style="color: var(--color-primary)"></i> Service Overview
+          </h2>
+          
+          <div class="hero-stats">
+            <div class="stat-box">
+              <div class="stat-label">Platform</div>
+              <div class="stat-value" id="platform-val">Loading...</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Uptime</div>
+              <div class="stat-value highlight" id="uptime-counter">00:00:00</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Database</div>
+              <div class="stat-value" style="display: flex; align-items: center; justify-content: center; gap: 0.25rem;" id="database-val">
+                Loading...
+              </div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Memory Info</div>
+              <div class="stat-value highlight" id="memory-val">Loading...</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">Node.js Version</div>
+              <div class="stat-value" id="node-val">Loading...</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label">API Latency</div>
+              <div class="stat-value highlight">~14ms</div>
+            </div>
+          </div>
+
+          <p style="color: var(--text-secondary); font-size: 0.95rem; line-height: 1.6;">
+            TitanBag Sync server facilitates secure cloud synchronizations, invitation-based partner connections, 
+            and offline-first client journal transactions. All synchronization datasets are authenticated 
+            and signed using JSON Web Tokens (JWT) to secure user privacy.
+          </p>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">
+            <i data-lucide="book-open" style="color: var(--color-primary)"></i> Endpoint Explorer
+          </h2>
+          
+          <div class="endpoints-section">
+            <!-- Endpoint: Register -->
+            <div class="endpoint-item">
+              <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                <div class="endpoint-badge-path">
+                  <span class="badge post">POST</span>
+                  <span class="endpoint-path">/register</span>
+                  <span class="endpoint-summary">Register a new cloud profile</span>
+                </div>
+                <i data-lucide="chevron-down" class="expand-icon"></i>
+              </div>
+              <div class="endpoint-details">
+                <p class="endpoint-desc">Creates a cloud profile on TitanBag, generates bcrypt password hashes, and returns a 30-day JWT session alongside a unique invitation code for partner syncing.</p>
+                
+                <div class="tab-container">
+                  <div class="tab-header">
+                    <button class="tab-btn active" onclick="switchTab(event, 'reg-req')">Request Payload</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'reg-res')">Success Response (201)</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'reg-curl')">cURL Request</button>
+                  </div>
+                  
+                  <div class="tab-pane active" id="reg-req">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>{
+  "username": "alex_johnson",
+  "email": "alex@example.com",
+  "password": "strongpassword123",
+  "display_name": "Alex"
+}</code></pre>
+                    </div>
+                  </div>
+                  
+                  <div class="tab-pane" id="reg-res">
+                    <pre><code>{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": "e4588eeb-4b2a-4aeb-9fd5-c9f2b8495fb6",
+    "username": "alex_johnson",
+    "email": "alex@example.com",
+    "display_name": "Alex",
+    "partner_share_code": "EXP-B9E8-3C2E-4D78-1A90",
+    "created_at": "2026-07-14T16:15:30.000Z",
+    "updated_at": "2026-07-14T16:15:30.000Z"
+  }
+}</code></pre>
+                  </div>
+
+                  <div class="tab-pane" id="reg-curl">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>curl -X POST http://localhost:5000/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alex_johnson","email":"alex@example.com","password":"strongpassword123","display_name":"Alex"}'</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Endpoint: Login -->
+            <div class="endpoint-item">
+              <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                <div class="endpoint-badge-path">
+                  <span class="badge post">POST</span>
+                  <span class="endpoint-path">/login</span>
+                  <span class="endpoint-summary">Authenticate credentials & session</span>
+                </div>
+                <i data-lucide="chevron-down" class="expand-icon"></i>
+              </div>
+              <div class="endpoint-details">
+                <p class="endpoint-desc">Accepts either username or email and validates password. Returns a JWT token and user profile metadata.</p>
+                
+                <div class="tab-container">
+                  <div class="tab-header">
+                    <button class="tab-btn active" onclick="switchTab(event, 'log-req')">Request Payload</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'log-res')">Success Response (200)</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'log-curl')">cURL Request</button>
+                  </div>
+                  
+                  <div class="tab-pane active" id="log-req">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>{
+  "identity": "alex_johnson", // username or email
+  "password": "strongpassword123"
+}</code></pre>
+                    </div>
+                  </div>
+                  
+                  <div class="tab-pane" id="log-res">
+                    <pre><code>{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "user": {
+    "id": "e4588eeb-4b2a-4aeb-9fd5-c9f2b8495fb6",
+    "username": "alex_johnson",
+    "email": "alex@example.com",
+    "display_name": "Alex",
+    "partner_share_code": "EXP-B9E8-3C2E-4D78-1A90",
+    "created_at": "2026-07-14T16:15:30.000Z",
+    "updated_at": "2026-07-14T16:15:30.000Z"
+  }
+}</code></pre>
+                  </div>
+
+                  <div class="tab-pane" id="log-curl">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>curl -X POST http://localhost:5000/login \
+  -H "Content-Type: application/json" \
+  -d '{"identity":"alex_johnson","password":"strongpassword123"}'</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Endpoint: Get Profile -->
+            <div class="endpoint-item">
+              <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                <div class="endpoint-badge-path">
+                  <span class="badge get">GET</span>
+                  <span class="endpoint-path">/profile</span>
+                  <span class="endpoint-summary">Retrieve user profile metadata</span>
+                </div>
+                <i data-lucide="chevron-down" class="expand-icon"></i>
+              </div>
+              <div class="endpoint-details">
+                <p class="endpoint-desc">Retrieves the active user credentials and details of the connected partner account if linked.</p>
+                
+                <div class="tab-container">
+                  <div class="tab-header">
+                    <button class="tab-btn active" onclick="switchTab(event, 'prof-req')">Request Headers</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'prof-res')">Success Response (200)</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'prof-curl')">cURL Request</button>
+                  </div>
+                  
+                  <div class="tab-pane active" id="prof-req">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>Authorization: Bearer <your_jwt_token></code></pre>
+                    </div>
+                  </div>
+                  
+                  <div class="tab-pane" id="prof-res">
+                    <pre><code>{
+  "user": {
+    "id": "e4588eeb-4b2a-4aeb-9fd5-c9f2b8495fb6",
+    "username": "alex_johnson",
+    "email": "alex@example.com",
+    "display_name": "Alex",
+    "partner_share_code": "EXP-B9E8-3C2E-4D78-1A90",
+    "created_at": "2026-07-14T16:15:30.000Z",
+    "updated_at": "2026-07-14T16:15:30.000Z",
+    "partner": {
+      "id": "f8a002eb-012b-3fac-2ed3-124facf9001b",
+      "username": "partner_display",
+      "display_name": "Jamie"
+    }
+  }
+}</code></pre>
+                  </div>
+
+                  <div class="tab-pane" id="prof-curl">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>curl -X GET http://localhost:5000/profile \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Endpoint: Connect Partner -->
+            <div class="endpoint-item">
+              <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                <div class="endpoint-badge-path">
+                  <span class="badge post">POST</span>
+                  <span class="endpoint-path">/partner/connect</span>
+                  <span class="endpoint-summary">Link accounts via invitation code</span>
+                </div>
+                <i data-lucide="chevron-down" class="expand-icon"></i>
+              </div>
+              <div class="endpoint-details">
+                <p class="endpoint-desc">Connects the current account to a partner profile using the partner's unique share code (e.g. <code>EXP-XXXX-XXXX-XXXX-XXXX</code>). Binds data streams immediately.</p>
+                
+                <div class="tab-container">
+                  <div class="tab-header">
+                    <button class="tab-btn active" onclick="switchTab(event, 'conn-req')">Request Payload</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'conn-res')">Success Response (200)</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'conn-curl')">cURL Request</button>
+                  </div>
+                  
+                  <div class="tab-pane active" id="conn-req">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>// Headers: Authorization: Bearer <your_jwt_token>
+{
+  "partner_share_code": "EXP-B9E8-3C2E-4D78-1A90"
+}</code></pre>
+                    </div>
+                  </div>
+                  
+                  <div class="tab-pane" id="conn-res">
+                    <pre><code>{
+  "message": "Connected with partner successfully",
+  "partner": {
+    "id": "e4588eeb-4b2a-4aeb-9fd5-c9f2b8495fb6",
+    "username": "alex_johnson",
+    "display_name": "Alex"
+  }
+}</code></pre>
+                  </div>
+
+                  <div class="tab-pane" id="conn-curl">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>curl -X POST http://localhost:5000/partner/connect \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"partner_share_code":"EXP-B9E8-3C2E-4D78-1A90"}'</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Endpoint: Disconnect Partner -->
+            <div class="endpoint-item">
+              <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                <div class="endpoint-badge-path">
+                  <span class="badge delete">DELETE</span>
+                  <span class="endpoint-path">/partner/disconnect</span>
+                  <span class="endpoint-summary">Unlink connected partner status</span>
+                </div>
+                <i data-lucide="chevron-down" class="expand-icon"></i>
+              </div>
+              <div class="endpoint-details">
+                <p class="endpoint-desc">Severs the current active link between the user's account and their partner. Both users return to standalone states.</p>
+                
+                <div class="tab-container">
+                  <div class="tab-header">
+                    <button class="tab-btn active" onclick="switchTab(event, 'disc-req')">Request Headers</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'disc-res')">Success Response (200)</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'disc-curl')">cURL Request</button>
+                  </div>
+                  
+                  <div class="tab-pane active" id="disc-req">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>Authorization: Bearer <your_jwt_token></code></pre>
+                    </div>
+                  </div>
+                  
+                  <div class="tab-pane" id="disc-res">
+                    <pre><code>{
+  "message": "Partner disconnected successfully"
+}</code></pre>
+                  </div>
+
+                  <div class="tab-pane" id="disc-curl">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>curl -X DELETE http://localhost:5000/partner/disconnect \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Endpoint: Sync -->
+            <div class="endpoint-item">
+              <div class="endpoint-header" onclick="toggleEndpoint(this)">
+                <div class="endpoint-badge-path">
+                  <span class="badge post">POST</span>
+                  <span class="endpoint-path">/sync</span>
+                  <span class="endpoint-summary">Synchronize database registers</span>
+                </div>
+                <i data-lucide="chevron-down" class="expand-icon"></i>
+              </div>
+              <div class="endpoint-details">
+                <p class="endpoint-desc">Offline-first cloud replication interface. Uploads local journals modifying, deleting, or inserting values, and pulls down all modifications done by partner accounts since the last timestamp.</p>
+                
+                <div class="tab-container">
+                  <div class="tab-header">
+                    <button class="tab-btn active" onclick="switchTab(event, 'sync-req')">Request Payload</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'sync-res')">Success Response (200)</button>
+                    <button class="tab-btn" onclick="switchTab(event, 'sync-curl')">cURL Request</button>
+                  </div>
+                  
+                  <div class="tab-pane active" id="sync-req">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>// Headers: Authorization: Bearer <your_jwt_token>
+{
+  "last_synced_at": "2026-07-14T10:00:00.000Z",
+  "local_journals": [
+    {
+      "id": "a7b309f4-124b-48aa-b3e1-d246cf901111",
+      "title": "Grocery Shopping",
+      "amount": 42.50,
+      "category": "Food",
+      "notes": "Weekly stock up",
+      "payment_method": "Card",
+      "date": "2026-07-14T11:30:00.000Z",
+      "updated_at": "2026-07-14T11:32:00.000Z",
+      "deleted": false
+    }
+  ]
+}</code></pre>
+                    </div>
+                  </div>
+                  
+                  <div class="tab-pane" id="sync-res">
+                    <pre><code>{
+  "synced_ids": [
+    "a7b309f4-124b-48aa-b3e1-d246cf901111"
+  ],
+  "remote_journals": [
+    {
+      "id": "c8d410f5-235c-59bb-c4f2-e357df012222",
+      "owner_id": "f8a002eb-012b-3fac-2ed3-124facf9001b",
+      "title": "Rent Payment",
+      "amount": 1200.00,
+      "category": "Home",
+      "notes": "Split with partner",
+      "payment_method": "Bank Transfer",
+      "date": "2026-07-14T09:00:00.000Z",
+      "created_at": "2026-07-14T09:00:00.000Z",
+      "updated_at": "2026-07-14T09:01:00.000Z",
+      "deleted": false
+    }
+  ]
+}</code></pre>
+                  </div>
+
+                  <div class="tab-pane" id="sync-curl">
+                    <div class="code-block-wrapper">
+                      <button class="btn-copy" onclick="copyCode(this)"><i data-lucide="copy" size="14"></i> Copy</button>
+                      <pre><code>curl -X POST http://localhost:5000/sync \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"last_synced_at":"2026-07-14T10:00:00.000Z","local_journals":[]}'</code></pre>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Column: Console / Health visualizer -->
+      <div>
+        <div class="card" style="margin-bottom: 2rem;">
+          <h2 class="card-title">
+            <i data-lucide="terminal" style="color: var(--color-primary)"></i> Live REST Tester
+          </h2>
+          <div class="tester-section">
+            <p style="color: var(--text-secondary); font-size: 0.85rem;">
+              Send an authorization and ping check directly to the root gateway of the TitanBag system.
+            </p>
+            
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button class="btn-test" id="btn-ping" onclick="pingServer()">
+                <i data-lucide="play" size="16"></i> Execute Ping Request
+              </button>
+            </div>
+
+            <div>
+              <div class="console-header">
+                <span>CONSOLE OUTPUT</span>
+                <span class="console-status" id="console-status" style="display: none;">
+                  <span class="console-status-dot"></span>
+                  <span id="console-status-code">200 OK</span>
+                </span>
+              </div>
+              <div class="code-block-wrapper">
+                <pre><code id="console-output">// Console idle. Press "Execute Ping Request" to verify connections.</code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 class="card-title">
+            <i data-lucide="share-2" style="color: var(--color-primary)"></i> Sync Ecosystem Flow
+          </h2>
+          
+          <div class="diagram-container">
+            <div class="diagram-title">System Infrastructure</div>
+            
+            <div class="flow-diagram">
+              <div class="flow-node">
+                <i data-lucide="smartphone"></i>
+                <span>Mobile App</span>
+                <div style="font-size: 0.7rem; color: var(--text-secondary);">Offline SQLite</div>
+              </div>
+              
+              <div class="flow-arrow">
+                <span style="font-size: 0.7rem;">Sync</span>
+                <i data-lucide="arrow-right-left"></i>
+                <span style="font-size: 0.7rem;">HTTPS</span>
+              </div>
+
+              <div class="flow-node" style="border-color: var(--color-primary);">
+                <i data-lucide="server"></i>
+                <span>Sync API</span>
+                <div style="font-size: 0.7rem; color: var(--color-primary);">Node & Express</div>
+              </div>
+
+              <div class="flow-arrow">
+                <span style="font-size: 0.7rem;">Query</span>
+                <i data-lucide="arrow-right-left"></i>
+                <span style="font-size: 0.7rem;">TCP/SSL</span>
+              </div>
+
+              <div class="flow-node db">
+                <i data-lucide="database"></i>
+                <span>Neon Database</span>
+                <div style="font-size: 0.7rem; color: #00cae3;">Serverless Postgres</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <p>TitanBag Cloud Gateway is powered by Node.js, Express, and Neon Serverless Database.</p>
+      <p style="margin-top: 0.5rem; font-size: 0.75rem;">Workspace instance running on port <span style="color: var(--text-primary);">5000</span>.</p>
+    </footer>
+  </div>
+
+  <script>
+    // Initialize Lucide Icons
+    lucide.createIcons();
+
+    // Toggle Endpoint expansion
+    function toggleEndpoint(element) {
+      const item = element.parentElement;
+      const isOpen = item.classList.contains('open');
+      
+      // Close all first for clean accordion experience
+      document.querySelectorAll('.endpoint-item').forEach(el => {
+        el.classList.remove('open');
+      });
+      
+      if (!isOpen) {
+        item.classList.add('open');
+      }
+    }
+
+    // Switch Tabs inside endpoints
+    function switchTab(event, targetId) {
+      event.stopPropagation();
+      const container = event.target.closest('.endpoint-details');
+      
+      // Update buttons
+      container.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.remove('active');
+      });
+      event.target.classList.add('active');
+      
+      // Update panes
+      container.querySelectorAll('.tab-pane').forEach(pane => {
+        pane.classList.remove('active');
+      });
+      container.querySelector('#' + targetId).classList.add('active');
+    }
+
+    // Copy code snippet to clipboard
+    function copyCode(btnElement) {
+      const codeWrapper = btnElement.closest('.code-block-wrapper');
+      const codeText = codeWrapper.querySelector('code').innerText;
+      
+      navigator.clipboard.writeText(codeText).then(() => {
+        const originalContent = btnElement.innerHTML;
+        btnElement.innerHTML = '<i data-lucide="check" size="14" style="color: var(--color-success)"></i> Copied!';
+        btnElement.style.borderColor = 'var(--color-success)';
+        lucide.createIcons();
+        
+        setTimeout(() => {
+          btnElement.innerHTML = originalContent;
+          btnElement.style.borderColor = '';
+          lucide.createIcons();
+        }, 2000);
+      });
+    }
+
+    // Live ping tester logic
+    function pingServer() {
+      const consoleOutput = document.getElementById('console-output');
+      const consoleStatus = document.getElementById('console-status');
+      const consoleStatusCode = document.getElementById('console-status-code');
+      const btnPing = document.getElementById('btn-ping');
+      
+      consoleOutput.innerHTML = '// Requesting status verification from API...';
+      btnPing.disabled = true;
+      btnPing.style.opacity = '0.7';
+
+      const startTime = performance.now();
+
+      // We explicitly request JSON so that server responds with JSON object
+      fetch('/', {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json'
+        }
+      })
+      .then(res => {
+        const endTime = performance.now();
+        const duration = Math.round(endTime - startTime);
+        
+        consoleStatusCode.innerText = `${res.status} ${res.statusText} (${duration}ms)`;
+        consoleStatus.style.display = 'flex';
+        
+        if (res.ok) {
+          consoleStatus.querySelector('.console-status-dot').style.backgroundColor = 'var(--color-success)';
+          consoleStatusCode.style.color = 'var(--color-success)';
+        } else {
+          consoleStatus.querySelector('.console-status-dot').style.backgroundColor = 'var(--color-delete)';
+          consoleStatusCode.style.color = 'var(--color-delete)';
+        }
+
+        return res.json();
+      })
+      .then(data => {
+        // Pretty print formatted JSON
+        const jsonStr = JSON.stringify(data, null, 2);
+        consoleOutput.innerHTML = highlightJson(jsonStr);
+      })
+      .catch(err => {
+        consoleStatus.style.display = 'flex';
+        consoleStatus.querySelector('.console-status-dot').style.backgroundColor = 'var(--color-delete)';
+        consoleStatusCode.innerText = 'Network Error';
+        consoleStatusCode.style.color = 'var(--color-delete)';
+        consoleOutput.innerHTML = `// Network communication error occurred:\n${err.message}`;
+      })
+      .finally(() => {
+        btnPing.disabled = false;
+        btnPing.style.opacity = '';
+      });
+    }
+
+    // Simple JSON highlighting helper
+    function highlightJson(json) {
+      if (typeof json !== 'string') {
+        json = JSON.stringify(json, undefined, 2);
+      }
+      json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, function (match) {
+        let cls = 'json-value-number';
+        if (/^"/.test(match)) {
+          if (/:$/.test(match)) {
+            cls = 'json-key';
+          } else {
+            cls = 'json-value-string';
+          }
+        } else if (/true|false/.test(match)) {
+          cls = 'json-value-boolean';
+        } else if (/null/.test(match)) {
+          cls = 'json-value-null';
+        }
+        return '<span class="' + cls + '">' + match + '</span>';
+      });
+    }
+
+    // Fetch live system stats from backend
+    let serverUptime = 0;
+    let uptimeInterval = null;
+
+    function fetchSystemStats() {
+      fetch('/api/info')
+        .then(res => res.json())
+        .then(data => {
+          // Initialize local uptime counter with server-reported value
+          serverUptime = data.uptime;
+          
+          // Update Platform
+          document.getElementById('platform-val').innerText = data.platform;
+          
+          // Update Database status text
+          const dbColor = data.database.includes('Connected') ? '#00cae3' : '#f59e0b';
+          document.getElementById('database-val').innerHTML = 
+            `<span style="width: 6px; height: 6px; background-color: ${dbColor}; border-radius: 50%;"></span> ${data.database}`;
+          
+          // Update Memory status
+          document.getElementById('memory-val').innerText = `${data.memory.free} / ${data.memory.total} free`;
+          
+          // Update Node version
+          document.getElementById('node-val').innerText = data.node_version;
+
+          // Start the client-side tick if not already running
+          if (!uptimeInterval) {
+            uptimeInterval = setInterval(updateUptime, 1000);
+            updateUptime();
+          }
+        })
+        .catch(err => {
+          console.error("Failed to fetch system stats:", err);
+          // Fallback UI texts
+          document.getElementById('platform-val').innerText = 'offline';
+          document.getElementById('database-val').innerText = 'unknown';
+          document.getElementById('memory-val').innerText = 'unknown';
+          document.getElementById('node-val').innerText = 'offline';
+        });
+    }
+
+    // Dynamic Client-side Uptime Tracker
+    function updateUptime() {
+      serverUptime++;
+      
+      const seconds = Math.floor(serverUptime % 60);
+      const minutes = Math.floor((serverUptime / 60) % 60);
+      const hours = Math.floor((serverUptime / (60 * 60)) % 24);
+      const days = Math.floor(serverUptime / (60 * 60 * 24));
+      
+      const pad = (num) => String(num).padStart(2, '0');
+      let displayStr = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+      if (days > 0) {
+        displayStr = `${days}d ` + displayStr;
+      }
+      document.getElementById('uptime-counter').innerText = displayStr;
+    }
+
+    // Run stats fetch on page load
+    window.addEventListener('DOMContentLoaded', fetchSystemStats);
+  </script>
+</body>
+</html>
