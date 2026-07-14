@@ -7,7 +7,10 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
+const { Resend } = require('resend');
 const { pool, initializeDatabase } = require('./db');
+
+const resend = new Resend('re_ejSGebMb_9NWuzS6BuCpXtDBkNtqWhVdx');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -185,6 +188,50 @@ app.post('/register', async (req, res) => {
     const newUser = result.rows[0];
     const token = jwt.sign({ id: newUser.id, username: newUser.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
+    // HTML Welcome Page Layout
+    const welcomeHtml = `
+      <div style="background-color: #07090e; color: #f3f4f6; font-family: 'Inter', Helvetica, Arial, sans-serif; padding: 40px 20px; text-align: center; border-radius: 12px; max-width: 600px; margin: 0 auto; border: 1px solid #1e2633;">
+        <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); width: 50px; height: 50px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); margin: 0 auto;">
+          <span style="font-size: 24px; color: white; font-weight: bold; line-height: 50px; display: block; text-align: center; width: 100%;">T</span>
+        </div>
+        <h1 style="font-size: 26px; font-weight: 800; margin-bottom: 10px; color: #a5b4fc;">Welcome to TitanBag!</h1>
+        <p style="color: #9ca3af; font-size: 15px; line-height: 1.6; margin-bottom: 30px;">
+          Hi ${newUser.display_name}, your offline-first personal wallet synchronization portal is ready. Easily manage and sync your expense journals securely.
+        </p>
+        <div style="background-color: #0f131a; border: 1px solid #1e2633; border-radius: 10px; padding: 20px; margin-bottom: 30px; text-align: left;">
+          <h3 style="color: #f3f4f6; margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #1e2633; padding-bottom: 10px; margin-bottom: 15px;">Your Connection Details</h3>
+          <div style="margin-bottom: 10px; font-size: 14px;">
+            <span style="color: #9ca3af;">Username:</span>
+            <strong style="color: #f3f4f6; float: right;">@${newUser.username}</strong>
+          </div>
+          <div style="font-size: 14px;">
+            <span style="color: #9ca3af;">Invitation Share Code:</span>
+            <strong style="color: #818cf8; font-family: monospace; float: right;">${newUser.partner_share_code}</strong>
+          </div>
+          <div style="clear: both;"></div>
+        </div>
+        <div style="background-color: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); color: #fb7185; padding: 15px 20px; border-radius: 10px; font-size: 13px; text-align: left; line-height: 1.5; margin-bottom: 30px;">
+          <strong style="display: block; margin-bottom: 5px;">⚠️ SECURITY WARNING</strong>
+          Connecting with a partner using your invitation code allows them to view, edit, and automatically synchronize your personal expense journals. Only share this code with trusted partners.
+        </div>
+        <div style="margin-top: 30px; border-top: 1px solid #1e2633; padding-top: 20px; color: #6b7280; font-size: 12px;">
+          TitanBag Secure Cloud Systems. Powered by Node.js & Neon Serverless PostgreSQL.
+        </div>
+      </div>
+    `;
+
+    // Asynchronously send onboarding welcome email via Resend (non-blocking)
+    resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: newUser.email,
+      subject: 'Welcome to TitanBag! 🎒',
+      html: welcomeHtml
+    }).then(emailRes => {
+      console.log('Welcome email dispatched successfully:', emailRes);
+    }).catch(emailErr => {
+      console.error('Welcome email dispatch failed:', emailErr);
+    });
+
     res.status(201).json({
       token,
       user: {
@@ -258,6 +305,105 @@ app.post('/login', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error during login" });
+  }
+});
+
+// Endpoint: POST /api/auth/forgot-password
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ message: "Email is required" });
+  }
+
+  try {
+    const userResult = await pool.query("SELECT id, display_name FROM users WHERE email = $1", [email.trim().toLowerCase()]);
+    if (userResult.rows.length === 0) {
+      // For security, do not leak whether email exists. Send success.
+      return res.status(200).json({ message: "If that email exists, we have sent a link to reset your password." });
+    }
+
+    const user = userResult.rows[0];
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    await pool.query(
+      'INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, $3)',
+      [user.id, token, expiresAt]
+    );
+
+    const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+    const host = req.get('host');
+    const resetLink = `${protocol}://${host}/reset-password?token=${token}`;
+
+    const resetHtml = `
+      <div style="background-color: #07090e; color: #f3f4f6; font-family: 'Inter', Helvetica, Arial, sans-serif; padding: 40px 20px; text-align: center; border-radius: 12px; max-width: 600px; margin: 0 auto; border: 1px solid #1e2633;">
+        <h2 style="font-size: 22px; font-weight: 700; color: #a5b4fc; margin-bottom: 15px;">Reset Your Password</h2>
+        <p style="color: #9ca3af; font-size: 15px; line-height: 1.6; margin-bottom: 25px;">
+          Hi ${user.display_name}, you requested a password reset for your TitanBag account. Click the button below to update your password. This link is active for <strong>10 minutes</strong> and will expire immediately after use.
+        </p>
+        <div style="margin: 25px 0;">
+          <a href="${resetLink}" style="background: linear-gradient(135deg, #6366f1, #8b5cf6); color: white; text-decoration: none; padding: 12px 24px; border-radius: 8px; font-weight: 600; display: inline-block; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);">Reset Password</a>
+        </div>
+        <p style="color: #6b7280; font-size: 12px; margin-top: 20px;">
+          If you did not request this, you can safely ignore this email. Your password will remain unchanged.
+        </p>
+      </div>
+    `;
+
+    // Asynchronously send reset email
+    resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: email.trim().toLowerCase(),
+      subject: 'Reset your TitanBag Password 🔒',
+      html: resetHtml
+    }).then(emailRes => {
+      console.log('Reset email dispatched successfully:', emailRes);
+    }).catch(emailErr => {
+      console.error('Reset email dispatch failed:', emailErr);
+    });
+
+    res.status(200).json({ message: "If that email exists, we have sent a link to reset your password." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error during password reset request" });
+  }
+});
+
+// Endpoint: POST /api/auth/reset-password
+app.post('/api/auth/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) {
+    return res.status(400).json({ message: "Token and password are required" });
+  }
+
+  if (password.length < 8) {
+    return res.status(400).json({ message: "Password must be at least 8 characters long" });
+  }
+
+  try {
+    // Look up token
+    const resetResult = await pool.query(
+      'SELECT * FROM password_resets WHERE token = $1 AND expires_at > NOW() AND used = false',
+      [token]
+    );
+
+    if (resetResult.rows.length === 0) {
+      return res.status(400).json({ message: "Invalid or expired password reset link" });
+    }
+
+    const resetRequest = resetResult.rows[0];
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Update password
+    await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, resetRequest.user_id]);
+    
+    // Mark token as used
+    await pool.query('UPDATE password_resets SET used = true WHERE id = $3', [resetRequest.id]);
+
+    res.status(200).json({ message: "Password reset successfully. You can now log in." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error resetting password" });
   }
 });
 
@@ -574,15 +720,7 @@ app.get('/api/god/users', authenticateGodToken, async (req, res) => {
   }
 });
 
-app.get("/login", (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'login.html'));
-});
-
-app.get("/dashboard", (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'dashboard.html'));
-});
-
-app.get("/", (req, res) => {
+app.get("*", (req, res) => {
   if (req.accepts('html')) {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
   } else {
