@@ -56,11 +56,14 @@ async function initializeDatabase() {
       CREATE TABLE IF NOT EXISTS journals (
         id UUID PRIMARY KEY,
         owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        shared_partner_id UUID REFERENCES users(id) ON DELETE SET NULL,
         title VARCHAR(255) NOT NULL,
         amount NUMERIC(15, 2) NOT NULL,
+        type VARCHAR(20) DEFAULT 'expense', -- credit, debit, income, expense
         category VARCHAR(100) NOT NULL,
         notes TEXT,
         payment_method VARCHAR(100),
+        location VARCHAR(255),
         date TIMESTAMP WITH TIME ZONE NOT NULL,
         created_at TIMESTAMP WITH TIME ZONE NOT NULL,
         updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -105,6 +108,30 @@ async function initializeDatabase() {
         ['admin', defaultUuid, 1]
       );
       console.log(`Seeded default god user (super_user: 'admin', authenticate: '${defaultUuid}')`);
+    }
+
+    // Seed default user profiles if empty
+    const checkUsers = await client.query('SELECT id FROM users LIMIT 1');
+    if (checkUsers.rows.length === 0) {
+      const now = new Date();
+      const passwordHash = await bcrypt.hash('password123', 10);
+      
+      await client.query(
+        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['00000000-0000-0000-0000-000000000001', 'primary_user', 'primary@expenso.com', 'Primary User', passwordHash, 'PRIM1234', now, now]
+      );
+      await client.query(
+        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['00000000-0000-0000-0000-000000000002', 'husband_john', 'john@expenso.com', 'Husband John', passwordHash, 'ABCD1234', now, now]
+      );
+      await client.query(
+        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['00000000-0000-0000-0000-000000000003', 'wife_jane', 'jane@expenso.com', 'Wife Jane', passwordHash, 'WIFE5678', now, now]
+      );
+      console.log("Seeded default users (primary_user, husband_john, wife_jane) in database.");
     }
 
     console.log("Database tables checked and initialized successfully.");
@@ -164,6 +191,159 @@ async function updateSchema() {
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
+    // 8. Create Categories Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS categories (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        type VARCHAR(20) NOT NULL,
+        icon VARCHAR(50),
+        color VARCHAR(20),
+        is_default BOOLEAN DEFAULT FALSE,
+        order_index INTEGER DEFAULT 0
+      );
+    `);
+
+    // 9. Create Accounts Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS accounts (
+        id SERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name VARCHAR(100) NOT NULL,
+        type VARCHAR(50) NOT NULL,
+        opening_balance NUMERIC(15, 2) DEFAULT 0.00,
+        current_balance NUMERIC(15, 2) DEFAULT 0.00,
+        icon VARCHAR(50),
+        color VARCHAR(20)
+      );
+    `);
+
+    // 10. Create Budgets Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS budgets (
+        id SERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+        budget_amount NUMERIC(15, 2) NOT NULL,
+        month INTEGER NOT NULL,
+        year INTEGER NOT NULL,
+        budget_type VARCHAR(50) DEFAULT 'MONTHLY',
+        start_date TIMESTAMP WITH TIME ZONE,
+        end_date TIMESTAMP WITH TIME ZONE,
+        budget_name VARCHAR(100)
+      );
+    `);
+
+    // 11. Create Savings Goals Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS savings_goals (
+        id SERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        target_amount NUMERIC(15, 2) NOT NULL,
+        current_amount NUMERIC(15, 2) DEFAULT 0.00,
+        target_date VARCHAR(50),
+        status VARCHAR(50) DEFAULT 'active',
+        icon VARCHAR(50),
+        color VARCHAR(20)
+      );
+    `);
+
+    // 12. Create Recurring Transactions Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS recurring_transactions (
+        id SERIAL PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount NUMERIC(15, 2) NOT NULL,
+        type VARCHAR(20) NOT NULL,
+        category_id INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+        account_id INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+        note TEXT,
+        frequency VARCHAR(50) NOT NULL,
+        next_execution_date VARCHAR(50),
+        enabled BOOLEAN DEFAULT TRUE
+      );
+    `);
+
+    // 13. Create Bank Accounts Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bank_accounts (
+        id VARCHAR(100) PRIMARY KEY,
+        account_number VARCHAR(50) NOT NULL,
+        bank_name VARCHAR(100) NOT NULL,
+        current_balance NUMERIC(15, 2) DEFAULT 0.00,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 14. Create Bank Transactions Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS bank_transactions (
+        id VARCHAR(100) PRIMARY KEY,
+        account_id VARCHAR(100) REFERENCES bank_accounts(id) ON DELETE CASCADE,
+        amount NUMERIC(15, 2) NOT NULL,
+        type VARCHAR(20) NOT NULL,
+        raw_message TEXT,
+        transaction_date TIMESTAMP WITH TIME ZONE,
+        merchant VARCHAR(255)
+      );
+    `);
+
+    // 15. Create Settings Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        id SERIAL PRIMARY KEY,
+        user_id UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        theme_mode VARCHAR(20) DEFAULT 'system',
+        currency VARCHAR(10) DEFAULT '₹',
+        pin_enabled BOOLEAN DEFAULT FALSE,
+        biometric_enabled BOOLEAN DEFAULT FALSE,
+        notifications_enabled BOOLEAN DEFAULT TRUE,
+        color_palette VARCHAR(50) DEFAULT 'Default'
+      );
+    `);
+
+    // Seed default categories if empty
+    const checkCategories = await client.query('SELECT id FROM categories LIMIT 1');
+    if (checkCategories.rows.length === 0) {
+      const defaultCategories = [
+        ['Bills', 'expense', 'receipt_long', '#FFDFBA', false, 1],
+        ['Car', 'expense', 'directions_car', '#BDB2FF', false, 2],
+        ['Clothes', 'expense', 'checkroom', '#FFC6FF', false, 3],
+        ['Communication', 'expense', 'chat', '#FFFFFC', false, 4],
+        ['Eating Out', 'expense', 'restaurant', '#E8F0FE', false, 5],
+        ['Entertainment', 'expense', 'theater_comedy', '#D6E4FF', false, 6],
+        ['Food', 'expense', 'restaurant', '#EAF2F8', false, 7],
+        ['Gifts', 'expense', 'featured_play_list', '#F5EEF8', false, 8],
+        ['Health', 'expense', 'medical_services', '#FDEDEC', false, 9],
+        ['House', 'expense', 'home', '#FEF9E7', false, 10],
+        ['Insurance', 'expense', 'shield', '#EAFAF1', false, 11],
+        ['Interest', 'expense', 'percent', '#F4ECF7', false, 12],
+        ['Medical', 'expense', 'vaccines', '#FDEDEC', false, 13],
+        ['Pets', 'expense', 'pets', '#FBEEE6', false, 14],
+        ['Sports', 'expense', 'sports_soccer', '#EBF5FB', false, 15],
+        ['Taxi', 'expense', 'local_taxi', '#FEF9E7', false, 16],
+        ['Toiletry', 'expense', 'soap', '#EAF2F8', false, 17],
+        ['Transport', 'expense', 'train', '#F5EEF8', false, 18],
+        ['Travel', 'expense', 'flight', '#FDEDEC', false, 19],
+        ['Awards', 'income', 'emoji_events', '#CAFFBF', false, 20],
+        ['Coupons', 'income', 'local_offer', '#9BF6FF', false, 21],
+        ['Grants', 'income', 'school', '#FFFFBA', false, 22],
+        ['Lottery', 'income', 'casino', '#FFCAD4', false, 23],
+        ['Refunds', 'income', 'receipt_long', '#A0C4FF', false, 24],
+        ['Rental', 'income', 'home', '#D8B4FE', false, 25],
+        ['Salary', 'income', 'payments', '#B9FBC0', false, 26],
+        ['Sold Items', 'income', 'storefront', '#FBF8CC', false, 27]
+      ];
+      for (const cat of defaultCategories) {
+        await client.query(
+          'INSERT INTO categories (name, type, icon, color, is_default, order_index) VALUES ($1, $2, $3, $4, $5, $6)',
+          cat
+        );
+      }
+      console.log("Seeded default categories in database.");
+    }
 
     console.log("Database schema updated successfully.");
   } catch (err) {
