@@ -15,7 +15,7 @@ const resend = new Resend(process.env.RESEND_MAIL || 're_placeholder_local_testi
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET;
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '519040911729-h8a7636p84v7vltnvstd6p9q9n0nc66v.apps.googleusercontent.com';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const RESEND_MAIL = process.env.RESEND_MAIL;
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
