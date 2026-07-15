@@ -876,6 +876,27 @@ app.get('/api/god/users', authenticateGodToken, async (req, res) => {
   }
 });
 
+app.post('/api/god/test-email', authenticateGodToken, async (req, res) => {
+  const { to, subject, html } = req.body;
+  if (!to || !subject || !html) {
+    return res.status(400).json({ message: "Recipient (to), subject, and html body are required" });
+  }
+
+  try {
+    const emailRes = await resend.emails.send({
+      from: 'onboarding@resend.dev',
+      to: to.trim(),
+      subject: subject.trim(),
+      html: html
+    });
+
+    res.status(200).json({ success: true, data: emailRes });
+  } catch (err) {
+    console.error("Test email send failed:", err);
+    res.status(500).json({ success: false, message: err.message || "Failed to send test email" });
+  }
+});
+
 app.get("*", (req, res) => {
   if (req.accepts('html')) {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
