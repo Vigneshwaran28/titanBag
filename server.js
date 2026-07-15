@@ -8,14 +8,15 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const { Resend } = require('resend');
-const { pool, initializeDatabase } = require('./db');
+const { pool, initializeDatabase, updateSchema } = require('./db');
 
-const resend = new Resend('re_ejSGebMb_9NWuzS6BuCpXtDBkNtqWhVdx');
+const resend = new Resend(process.env.RESEND_MAIL || 're_placeholder_local_testing');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET;
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const RESEND_MAIL = process.env.RESEND_MAIL;
 
 const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
@@ -396,7 +397,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 
     // Update password
     await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, resetRequest.user_id]);
-    
+
     // Mark token as used
     await pool.query('UPDATE password_resets SET used = true WHERE id = $3', [resetRequest.id]);
 
@@ -520,6 +521,160 @@ app.delete('/partner/disconnect', authenticateToken, async (req, res) => {
   }
 });
 
+// Endpoint: POST /api/partner/block
+app.post('/api/partner/block', authenticateToken, async (req, res) => {
+  try {
+    await pool.query(
+      "UPDATE partners SET status = 'blocked' WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active'",
+      [req.user.id]
+    );
+    res.json({ success: true, message: "Partner blocked" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error blocking partner" });
+  }
+});
+
+
+// --- SHARED JOURNALS ENDPOINTS ---
+
+// Create Shared Journal
+app.post('/api/journals', authenticateToken, async (req, res) => {
+  const { title, description, start_date, end_date, currency } = req.body;
+  if (!title) return res.status(400).json({ message: "Title is required" });
+
+  try {
+    const joinToken = crypto.randomBytes(16).toString('hex');
+    const result = await pool.query(
+      `INSERT INTO shared_journals (creator_id, title, description, start_date, end_date, currency, join_token)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.user.id, title, description, start_date, end_date, currency || '₹', joinToken]
+    );
+
+    const journal = result.rows[0];
+
+    // Add creator as member
+    await pool.query(
+      `INSERT INTO journal_members (journal_id, user_id, role) VALUES ($1, $2, 'creator')`,
+      [journal.id, req.user.id]
+    );
+
+    res.status(201).json(journal);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error creating shared journal" });
+  }
+});
+
+// Join Shared Journal
+app.post('/api/journals/join', authenticateToken, async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ message: "Join token required" });
+
+  try {
+    const journalRes = await pool.query("SELECT id FROM shared_journals WHERE join_token = $1", [token]);
+    if (journalRes.rows.length === 0) return res.status(404).json({ message: "Invalid join token" });
+
+    const journalId = journalRes.rows[0].id;
+
+    // Check if already a member
+    const memberCheck = await pool.query(
+      "SELECT user_id FROM journal_members WHERE journal_id = $1 AND user_id = $2",
+      [journalId, req.user.id]
+    );
+    if (memberCheck.rows.length > 0) return res.status(400).json({ message: "Already a member of this journal" });
+
+    await pool.query(
+      "INSERT INTO journal_members (journal_id, user_id) VALUES ($1, $2)",
+      [journalId, req.user.id]
+    );
+
+    res.json({ success: true, journal_id: journalId });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error joining journal" });
+  }
+});
+
+// List My Shared Journals
+app.get('/api/journals', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT j.*, m.role,
+       (SELECT count(*) FROM journal_members WHERE journal_id = j.id) as member_count
+       FROM shared_journals j
+       JOIN journal_members m ON j.id = m.journal_id
+       WHERE m.user_id = $1`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching journals" });
+  }
+});
+
+// Get Journal Details & Transactions
+app.get('/api/journals/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    // Verify membership
+    const memberCheck = await pool.query(
+      "SELECT role FROM journal_members WHERE journal_id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) return res.status(403).json({ message: "Access denied" });
+
+    const journalRes = await pool.query("SELECT * FROM shared_journals WHERE id = $1", [id]);
+    const membersRes = await pool.query(
+      `SELECT u.id, u.username, u.display_name, m.role
+       FROM users u JOIN journal_members m ON u.id = m.user_id
+       WHERE m.journal_id = $1`, [id]
+    );
+    const txRes = await pool.query(
+      `SELECT t.*, u.display_name as paid_by_name
+       FROM journal_transactions t
+       JOIN users u ON t.paid_by = u.id
+       WHERE t.journal_id = $1 ORDER BY t.date DESC`, [id]
+    );
+
+    res.json({
+      journal: journalRes.rows[0],
+      members: membersRes.rows,
+      transactions: txRes.rows
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching journal details" });
+  }
+});
+
+// Add Transaction to Shared Journal
+app.post('/api/journals/:id/transactions', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { amount, category, description, date, type, notes } = req.body;
+
+  try {
+    // Verify membership
+    const memberCheck = await pool.query(
+      "SELECT role FROM journal_members WHERE journal_id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) return res.status(403).json({ message: "Access denied" });
+
+    const result = await pool.query(
+      `INSERT INTO journal_transactions (journal_id, paid_by, amount, category, description, date, type, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [id, req.user.id, amount, category, description, date, type || 'expense', notes]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error adding transaction" });
+  }
+});
+
 // Endpoint: POST /sync
 app.post('/sync', authenticateToken, async (req, res) => {
   const { journals } = req.body;
@@ -631,6 +786,7 @@ app.post('/sync', authenticateToken, async (req, res) => {
 // App initialization
 if (process.env.DATABASE_URL) {
   initializeDatabase()
+    .then(() => updateSchema())
     .then(() => {
       app.listen(PORT, () => {
         console.log(`TitanBag Sync server is running on port ${PORT}`);
@@ -682,7 +838,7 @@ app.post('/api/god/login', async (req, res) => {
       return res.status(401).json({ message: "Invalid admin credentials" });
     }
     const god = result.rows[0];
-    
+
     // UUID comparison as string equality (direct text auth check)
     const passwordMatch = password.trim().toLowerCase() === String(god.authenticate).toLowerCase();
     if (!passwordMatch) {

@@ -116,7 +116,65 @@ async function initializeDatabase() {
   }
 }
 
+async function updateSchema() {
+  const client = await pool.connect();
+  try {
+    console.log("Updating database schema with new tables...");
+
+    // 5. Create Shared Journals Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS shared_journals (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        creator_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        start_date DATE,
+        end_date DATE,
+        currency VARCHAR(10) DEFAULT '₹',
+        join_token VARCHAR(255) UNIQUE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    // 6. Create Journal Members Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS journal_members (
+        journal_id UUID NOT NULL REFERENCES shared_journals(id) ON DELETE CASCADE,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        role VARCHAR(50) DEFAULT 'member',
+        joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (journal_id, user_id)
+      );
+    `);
+
+    // 7. Create Journal Transactions Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS journal_transactions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        journal_id UUID NOT NULL REFERENCES shared_journals(id) ON DELETE CASCADE,
+        paid_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        amount NUMERIC(15, 2) NOT NULL,
+        category VARCHAR(100) NOT NULL,
+        description VARCHAR(255),
+        date TIMESTAMP WITH TIME ZONE NOT NULL,
+        type VARCHAR(20) DEFAULT 'expense',
+        notes TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    console.log("Database schema updated successfully.");
+  } catch (err) {
+    console.error("Error updating database schema:", err);
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   pool,
-  initializeDatabase
+  initializeDatabase,
+  updateSchema
 };
