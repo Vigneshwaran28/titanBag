@@ -34,8 +34,29 @@ function getClientIp(req) {
 }
 
 // Endpoint: POST /login/google
+// Helper to record registered device in device_register table
+async function registerDevice(userId, req) {
+  try {
+    const { device_id, device_model, device_manufacturer } = req.body;
+    if (device_id) {
+      const id = crypto.randomUUID();
+      const deviceName = device_manufacturer ? `${device_manufacturer} ${device_model}` : (device_model || 'Unknown Device');
+      await pool.query(
+        `INSERT INTO device_register (id, user_id, device_id, device_name, device_model)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, device_id) DO UPDATE SET registered_at = NOW()`,
+        [id, userId, device_id, deviceName, device_model || 'Unknown']
+      );
+      console.log(`Device registered: ${deviceName} (ID: ${device_id}) for User: ${userId}`);
+    }
+  } catch (err) {
+    console.error("Device registration error:", err);
+  }
+}
+
+// Endpoint: POST /login/google
 app.post('/login/google', async (req, res) => {
-  const { id_token, device_model, device_manufacturer } = req.body;
+  const { id_token, display_name, profile_photo, device_model, device_manufacturer, device_id } = req.body;
 
   if (!id_token) {
     return res.status(400).json({ message: "Google ID token required" });
@@ -52,7 +73,6 @@ app.post('/login/google', async (req, res) => {
     const name = payload.name;
     const googleId = payload.sub;
     const ipAddress = getClientIp(req);
-    // Simple location placeholder (would usually need a GeoIP service)
     const location = req.headers['x-vercel-ip-city'] || req.headers['cf-ipcity'] || 'Unknown';
 
     // Check if user exists by email
@@ -67,20 +87,27 @@ app.post('/login/google', async (req, res) => {
       const timestamp = new Date();
 
       const insertResult = await pool.query(
-        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, ip_address, location, device_model, device_manufacturer, created_at, updated_at, last_login)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, username, email, display_name, partner_share_code, created_at, updated_at`,
-        [userId, username, email.toLowerCase(), name, 'GOOGLE_AUTH_EXTERNAL', partnerShareCode, ipAddress, location, device_model, device_manufacturer, timestamp, timestamp, timestamp]
+        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, ip_address, location, device_model, device_manufacturer, profile_photo, auth_token, created_at, updated_at, last_login)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id, username, email, display_name, partner_share_code, profile_photo, created_at, updated_at`,
+        [userId, username, email.toLowerCase(), display_name || name, 'GOOGLE_AUTH_EXTERNAL', partnerShareCode, ipAddress, location, device_model, device_manufacturer, profile_photo || payload.picture, id_token, timestamp, timestamp, timestamp]
       );
       user = insertResult.rows[0];
     } else {
       user = userResult.rows[0];
       // Update last login and device info
       const timestamp = new Date();
-      await pool.query(
-        "UPDATE users SET last_login = $1, ip_address = $2, location = $3, device_model = $4, device_manufacturer = $5 WHERE id = $6",
-        [timestamp, ipAddress, location, device_model, device_manufacturer, user.id]
+      const updatedResult = await pool.query(
+        `UPDATE users 
+         SET last_login = $1, ip_address = $2, location = $3, device_model = $4, device_manufacturer = $5, profile_photo = COALESCE($6, profile_photo), auth_token = $7 
+         WHERE id = $8 
+         RETURNING id, username, email, display_name, partner_share_code, profile_photo, created_at, updated_at`,
+        [timestamp, ipAddress, location, device_model, device_manufacturer, profile_photo || payload.picture, id_token, user.id]
       );
+      user = updatedResult.rows[0];
     }
+
+    // Call device registration helper
+    await registerDevice(user.id, req);
 
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
@@ -91,6 +118,7 @@ app.post('/login/google', async (req, res) => {
         username: user.username,
         email: user.email,
         display_name: user.display_name,
+        profile_photo: user.profile_photo,
         partner_share_code: user.partner_share_code,
         created_at: user.created_at,
         updated_at: user.updated_at
@@ -152,7 +180,7 @@ function authenticateGodToken(req, res, next) {
 
 // Endpoint: POST /register
 app.post('/register', async (req, res) => {
-  const { username, email, password, display_name, device_model, device_manufacturer } = req.body;
+  const { username, email, password, display_name, device_model, device_manufacturer, device_id } = req.body;
 
   if (!username || !email || !password || !display_name) {
     return res.status(400).json({ message: "All fields are required" });
@@ -187,6 +215,10 @@ app.post('/register', async (req, res) => {
     );
 
     const newUser = result.rows[0];
+
+    // Register device
+    await registerDevice(newUser.id, req);
+
     const token = jwt.sign({ id: newUser.id, username: newUser.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
     // HTML Welcome Page Layout
@@ -254,7 +286,7 @@ app.post('/register', async (req, res) => {
 
 // Endpoint: POST /login
 app.post('/login', async (req, res) => {
-  const { identifier, password, device_model, device_manufacturer } = req.body;
+  const { identifier, password, device_model, device_manufacturer, device_id } = req.body;
 
   if (!identifier || !password) {
     return res.status(400).json({ message: "Identifier and password required" });
@@ -287,6 +319,9 @@ app.post('/login', async (req, res) => {
       [timestamp, ipAddress, location, device_model, device_manufacturer, user.id]
     );
 
+    // Call device registration helper
+    await registerDevice(user.id, req);
+
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
     res.status(200).json({
@@ -296,6 +331,7 @@ app.post('/login', async (req, res) => {
         username: user.username,
         email: user.email,
         display_name: user.display_name,
+        profile_photo: user.profile_photo,
         partner_share_code: user.partner_share_code,
         created_at: user.created_at,
         updated_at: user.updated_at,
@@ -780,6 +816,537 @@ app.post('/sync', authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Server error during synchronization" });
   } finally {
     client.release();
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ACCOUNTS — user wallet/bank accounts
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/accounts — list all accounts for the logged-in user
+app.get('/api/accounts', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM accounts WHERE user_id = $1 ORDER BY id ASC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching accounts' });
+  }
+});
+
+// POST /api/accounts — create a new account
+app.post('/api/accounts', authenticateToken, async (req, res) => {
+  const { name, type, opening_balance, current_balance, icon, color } = req.body;
+  if (!name || !type) return res.status(400).json({ message: 'name and type are required' });
+  try {
+    const result = await pool.query(
+      `INSERT INTO accounts (user_id, name, type, opening_balance, current_balance, icon, color)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.user.id, name, type, opening_balance || 0, current_balance || 0, icon || null, color || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating account' });
+  }
+});
+
+// PUT /api/accounts/:id — update an account
+app.put('/api/accounts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { name, type, opening_balance, current_balance, icon, color } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE accounts
+       SET name = COALESCE($1, name), type = COALESCE($2, type),
+           opening_balance = COALESCE($3, opening_balance), current_balance = COALESCE($4, current_balance),
+           icon = COALESCE($5, icon), color = COALESCE($6, color)
+       WHERE id = $7 AND user_id = $8 RETURNING *`,
+      [name, type, opening_balance, current_balance, icon, color, id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Account not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating account' });
+  }
+});
+
+// DELETE /api/accounts/:id — delete an account
+app.delete('/api/accounts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM accounts WHERE id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Account not found' });
+    res.json({ success: true, message: 'Account deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error deleting account' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BUDGETS — monthly/custom budgets per user
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/budgets — list all budgets for the logged-in user
+app.get('/api/budgets', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM budgets WHERE user_id = $1 ORDER BY year DESC, month DESC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching budgets' });
+  }
+});
+
+// POST /api/budgets — create a new budget
+app.post('/api/budgets', authenticateToken, async (req, res) => {
+  const { category_id, budget_amount, month, year, budget_type, start_date, end_date, budget_name } = req.body;
+  if (!budget_amount || !month || !year) {
+    return res.status(400).json({ message: 'budget_amount, month, and year are required' });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO budgets (user_id, category_id, budget_amount, month, year, budget_type, start_date, end_date, budget_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.user.id, category_id || null, budget_amount, month, year, budget_type || 'MONTHLY', start_date || null, end_date || null, budget_name || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating budget' });
+  }
+});
+
+// PUT /api/budgets/:id — update a budget
+app.put('/api/budgets/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { category_id, budget_amount, month, year, budget_type, start_date, end_date, budget_name } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE budgets
+       SET category_id = COALESCE($1, category_id), budget_amount = COALESCE($2, budget_amount),
+           month = COALESCE($3, month), year = COALESCE($4, year),
+           budget_type = COALESCE($5, budget_type), start_date = COALESCE($6, start_date),
+           end_date = COALESCE($7, end_date), budget_name = COALESCE($8, budget_name)
+       WHERE id = $9 AND user_id = $10 RETURNING *`,
+      [category_id, budget_amount, month, year, budget_type, start_date, end_date, budget_name, id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Budget not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating budget' });
+  }
+});
+
+// DELETE /api/budgets/:id — delete a budget
+app.delete('/api/budgets/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM budgets WHERE id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Budget not found' });
+    res.json({ success: true, message: 'Budget deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error deleting budget' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SAVINGS GOALS — per-user savings targets
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/savings-goals — list all savings goals for the logged-in user
+app.get('/api/savings-goals', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM savings_goals WHERE user_id = $1 ORDER BY id ASC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching savings goals' });
+  }
+});
+
+// POST /api/savings-goals — create a new savings goal
+app.post('/api/savings-goals', authenticateToken, async (req, res) => {
+  const { title, target_amount, current_amount, target_date, status, icon, color } = req.body;
+  if (!title || !target_amount) return res.status(400).json({ message: 'title and target_amount are required' });
+  try {
+    const result = await pool.query(
+      `INSERT INTO savings_goals (user_id, title, target_amount, current_amount, target_date, status, icon, color)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [req.user.id, title, target_amount, current_amount || 0, target_date || null, status || 'active', icon || null, color || null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating savings goal' });
+  }
+});
+
+// PUT /api/savings-goals/:id — update a savings goal
+app.put('/api/savings-goals/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { title, target_amount, current_amount, target_date, status, icon, color } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE savings_goals
+       SET title = COALESCE($1, title), target_amount = COALESCE($2, target_amount),
+           current_amount = COALESCE($3, current_amount), target_date = COALESCE($4, target_date),
+           status = COALESCE($5, status), icon = COALESCE($6, icon), color = COALESCE($7, color)
+       WHERE id = $8 AND user_id = $9 RETURNING *`,
+      [title, target_amount, current_amount, target_date, status, icon, color, id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Savings goal not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating savings goal' });
+  }
+});
+
+// DELETE /api/savings-goals/:id — delete a savings goal
+app.delete('/api/savings-goals/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM savings_goals WHERE id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Savings goal not found' });
+    res.json({ success: true, message: 'Savings goal deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error deleting savings goal' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RECURRING TRANSACTIONS — per-user recurring expense/income rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/recurring-transactions — list all recurring transactions for the logged-in user
+app.get('/api/recurring-transactions', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM recurring_transactions WHERE user_id = $1 ORDER BY id ASC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching recurring transactions' });
+  }
+});
+
+// POST /api/recurring-transactions — create a recurring transaction rule
+app.post('/api/recurring-transactions', authenticateToken, async (req, res) => {
+  const { amount, type, category_id, account_id, note, frequency, next_execution_date, enabled } = req.body;
+  if (!amount || !type || !frequency) {
+    return res.status(400).json({ message: 'amount, type, and frequency are required' });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO recurring_transactions (user_id, amount, type, category_id, account_id, note, frequency, next_execution_date, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+      [req.user.id, amount, type, category_id || null, account_id || null, note || null, frequency, next_execution_date || null, enabled !== undefined ? enabled : true]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating recurring transaction' });
+  }
+});
+
+// PUT /api/recurring-transactions/:id — update a recurring transaction rule
+app.put('/api/recurring-transactions/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { amount, type, category_id, account_id, note, frequency, next_execution_date, enabled } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE recurring_transactions
+       SET amount = COALESCE($1, amount), type = COALESCE($2, type),
+           category_id = COALESCE($3, category_id), account_id = COALESCE($4, account_id),
+           note = COALESCE($5, note), frequency = COALESCE($6, frequency),
+           next_execution_date = COALESCE($7, next_execution_date),
+           enabled = COALESCE($8, enabled)
+       WHERE id = $9 AND user_id = $10 RETURNING *`,
+      [amount, type, category_id, account_id, note, frequency, next_execution_date, enabled, id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Recurring transaction not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating recurring transaction' });
+  }
+});
+
+// DELETE /api/recurring-transactions/:id — delete a recurring transaction rule
+app.delete('/api/recurring-transactions/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM recurring_transactions WHERE id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Recurring transaction not found' });
+    res.json({ success: true, message: 'Recurring transaction deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error deleting recurring transaction' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SETTINGS — one row per user; upsert on POST
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/settings — get settings for the logged-in user
+app.get('/api/settings', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM settings WHERE user_id = $1',
+      [req.user.id]
+    );
+    if (result.rows.length === 0) {
+      // Return defaults if not yet saved
+      return res.json({
+        user_id: req.user.id,
+        theme_mode: 'system',
+        currency: '₹',
+        pin_enabled: false,
+        biometric_enabled: false,
+        notifications_enabled: true,
+        debt_list_enabled: true,
+        color_palette: 'Default',
+        custom_color: null,
+        custom_icon_color: null,
+        custom_bg_color: null
+      });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching settings' });
+  }
+});
+
+// POST /api/settings — upsert (create or update) settings for the logged-in user
+app.post('/api/settings', authenticateToken, async (req, res) => {
+  const {
+    theme_mode, currency, pin_enabled, biometric_enabled,
+    notifications_enabled, debt_list_enabled, color_palette,
+    custom_color, custom_icon_color, custom_bg_color
+  } = req.body;
+  try {
+    const result = await pool.query(
+      `INSERT INTO settings (user_id, theme_mode, currency, pin_enabled, biometric_enabled, notifications_enabled, debt_list_enabled, color_palette, custom_color, custom_icon_color, custom_bg_color)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       ON CONFLICT (user_id) DO UPDATE SET
+         theme_mode            = COALESCE(EXCLUDED.theme_mode, settings.theme_mode),
+         currency              = COALESCE(EXCLUDED.currency, settings.currency),
+         pin_enabled           = COALESCE(EXCLUDED.pin_enabled, settings.pin_enabled),
+         biometric_enabled     = COALESCE(EXCLUDED.biometric_enabled, settings.biometric_enabled),
+         notifications_enabled = COALESCE(EXCLUDED.notifications_enabled, settings.notifications_enabled),
+         debt_list_enabled     = COALESCE(EXCLUDED.debt_list_enabled, settings.debt_list_enabled),
+         color_palette         = COALESCE(EXCLUDED.color_palette, settings.color_palette),
+         custom_color          = COALESCE(EXCLUDED.custom_color, settings.custom_color),
+         custom_icon_color     = COALESCE(EXCLUDED.custom_icon_color, settings.custom_icon_color),
+         custom_bg_color       = COALESCE(EXCLUDED.custom_bg_color, settings.custom_bg_color)
+       RETURNING *`,
+      [
+        req.user.id,
+        theme_mode || 'system',
+        currency || '₹',
+        pin_enabled !== undefined ? pin_enabled : false,
+        biometric_enabled !== undefined ? biometric_enabled : false,
+        notifications_enabled !== undefined ? notifications_enabled : true,
+        debt_list_enabled !== undefined ? debt_list_enabled : true,
+        color_palette || 'Default',
+        custom_color || null,
+        custom_icon_color || null,
+        custom_bg_color || null
+      ]
+    );
+    res.status(200).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error saving settings' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEBT RECORDS — personal debt/credit tracking per user
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/debts — list all debt records for the logged-in user
+app.get('/api/debts', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM debt_records WHERE user_id = $1 ORDER BY borrowed_date DESC',
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching debt records' });
+  }
+});
+
+// POST /api/debts — create a new debt record
+app.post('/api/debts', authenticateToken, async (req, res) => {
+  const { id, person_name, borrowed_date, action, amount, remainder_boolean, date_timestamp, returned_date, status, mode_of_transaction } = req.body;
+  if (!person_name || !borrowed_date || !action || !amount) {
+    return res.status(400).json({ message: 'person_name, borrowed_date, action, and amount are required' });
+  }
+  if (!['Debt', 'Credit'].includes(action)) {
+    return res.status(400).json({ message: 'action must be "Debt" or "Credit"' });
+  }
+  try {
+    const recordId = id || crypto.randomUUID();
+    const result = await pool.query(
+      `INSERT INTO debt_records (id, user_id, person_name, borrowed_date, action, amount, remainder_boolean, date_timestamp, returned_date, status, mode_of_transaction)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [recordId, req.user.id, person_name, borrowed_date, action, amount, remainder_boolean || false, date_timestamp || null, returned_date || null, status || 'Pending', mode_of_transaction || 'Cash']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating debt record' });
+  }
+});
+
+// PUT /api/debts/:id — update a debt record (e.g. mark as returned)
+app.put('/api/debts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { person_name, borrowed_date, action, amount, remainder_boolean, date_timestamp, returned_date, status, mode_of_transaction } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE debt_records
+       SET person_name         = COALESCE($1, person_name),
+           borrowed_date       = COALESCE($2, borrowed_date),
+           action              = COALESCE($3, action),
+           amount              = COALESCE($4, amount),
+           remainder_boolean   = COALESCE($5, remainder_boolean),
+           date_timestamp      = COALESCE($6, date_timestamp),
+           returned_date       = COALESCE($7, returned_date),
+           status              = COALESCE($8, status),
+           mode_of_transaction = COALESCE($9, mode_of_transaction)
+       WHERE id = $10 AND user_id = $11 RETURNING *`,
+      [person_name, borrowed_date, action, amount, remainder_boolean, date_timestamp, returned_date, status, mode_of_transaction, id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Debt record not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating debt record' });
+  }
+});
+
+// DELETE /api/debts/:id — delete a debt record
+app.delete('/api/debts/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM debt_records WHERE id = $1 AND user_id = $2',
+      [id, req.user.id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Debt record not found' });
+    res.json({ success: true, message: 'Debt record deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error deleting debt record' });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CATEGORIES — global shared categories (read + create custom)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GET /api/categories — list all categories (default + custom)
+app.get('/api/categories', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT * FROM categories ORDER BY order_index ASC, id ASC'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching categories' });
+  }
+});
+
+// POST /api/categories — create a custom category
+app.post('/api/categories', authenticateToken, async (req, res) => {
+  const { name, type, icon, color, order_index } = req.body;
+  if (!name || !type) return res.status(400).json({ message: 'name and type are required' });
+  if (!['income', 'expense'].includes(type)) {
+    return res.status(400).json({ message: 'type must be "income" or "expense"' });
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO categories (name, type, icon, color, is_default, order_index)
+       VALUES ($1, $2, $3, $4, false, $5) RETURNING *`,
+      [name, type, icon || null, color || null, order_index || 0]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error creating category' });
+  }
+});
+
+// PUT /api/categories/:id — update a custom (non-default) category
+app.put('/api/categories/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { name, type, icon, color, order_index } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE categories
+       SET name = COALESCE($1, name), type = COALESCE($2, type),
+           icon = COALESCE($3, icon), color = COALESCE($4, color),
+           order_index = COALESCE($5, order_index)
+       WHERE id = $6 AND is_default = false RETURNING *`,
+      [name, type, icon, color, order_index, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Category not found or is a default category' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error updating category' });
+  }
+});
+
+// DELETE /api/categories/:id — delete a custom (non-default) category
+app.delete('/api/categories/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      'DELETE FROM categories WHERE id = $1 AND is_default = false',
+      [id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ message: 'Category not found or is a default category' });
+    res.json({ success: true, message: 'Category deleted' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error deleting category' });
   }
 });
 
