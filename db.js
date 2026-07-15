@@ -345,6 +345,23 @@ async function updateSchema() {
       console.log("Seeded default categories in database.");
     }
 
+    // 16. Create Debt Records Table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS debt_records (
+        id UUID PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        person_name VARCHAR(100) NOT NULL,
+        borrowed_date VARCHAR(50) NOT NULL,
+        action VARCHAR(20) NOT NULL, -- Debt or Credit
+        amount NUMERIC(15, 2) NOT NULL,
+        remainder_boolean BOOLEAN DEFAULT FALSE,
+        date_timestamp VARCHAR(50),
+        returned_date VARCHAR(50),
+        status VARCHAR(50) DEFAULT 'Pending',
+        mode_of_transaction VARCHAR(50) DEFAULT 'Cash'
+      );
+    `);
+
     console.log("Database schema updated successfully.");
   } catch (err) {
     console.error("Error updating database schema:", err);
