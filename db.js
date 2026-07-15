@@ -338,60 +338,38 @@ async function initializeDatabase() {
     }
 
     // Seed default sample users if table is empty
-    const checkUsers = await client.query('SELECT id FROM users LIMIT 1');
-    if (checkUsers.rows.length === 0) {
-      const now = new Date();
-      const passwordHash = await bcrypt.hash('password123', 10);
-
-      await client.query(
-        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        ['00000000-0000-0000-0000-000000000001', 'primary_user', 'primary@expenso.com', 'Primary User', passwordHash, 'PRIM1234', now, now]
-      );
-      await client.query(
-        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        ['00000000-0000-0000-0000-000000000002', 'husband_john', 'john@expenso.com', 'Husband John', passwordHash, 'ABCD1234', now, now]
-      );
-      await client.query(
-        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        ['00000000-0000-0000-0000-000000000003', 'wife_jane', 'jane@expenso.com', 'Wife Jane', passwordHash, 'WIFE5678', now, now]
-      );
-      console.log("Seeded default users (primary_user, husband_john, wife_jane) in database.");
-    }
 
     // Seed default categories if table is empty
     const checkCategories = await client.query('SELECT id FROM categories LIMIT 1');
     if (checkCategories.rows.length === 0) {
       const defaultCategories = [
-        ['Bills',         'expense', 'receipt_long',      '#FFDFBA', false, 1],
-        ['Car',           'expense', 'directions_car',    '#BDB2FF', false, 2],
-        ['Clothes',       'expense', 'checkroom',         '#FFC6FF', false, 3],
-        ['Communication', 'expense', 'chat',              '#FFFFFC', false, 4],
-        ['Eating Out',    'expense', 'restaurant',        '#E8F0FE', false, 5],
-        ['Entertainment', 'expense', 'theater_comedy',    '#D6E4FF', false, 6],
-        ['Food',          'expense', 'restaurant',        '#EAF2F8', false, 7],
-        ['Gifts',         'expense', 'featured_play_list','#F5EEF8', false, 8],
-        ['Health',        'expense', 'medical_services',  '#FDEDEC', false, 9],
-        ['House',         'expense', 'home',              '#FEF9E7', false, 10],
-        ['Insurance',     'expense', 'shield',            '#EAFAF1', false, 11],
-        ['Interest',      'expense', 'percent',           '#F4ECF7', false, 12],
-        ['Medical',       'expense', 'vaccines',          '#FDEDEC', false, 13],
-        ['Pets',          'expense', 'pets',              '#FBEEE6', false, 14],
-        ['Sports',        'expense', 'sports_soccer',     '#EBF5FB', false, 15],
-        ['Taxi',          'expense', 'local_taxi',        '#FEF9E7', false, 16],
-        ['Toiletry',      'expense', 'soap',              '#EAF2F8', false, 17],
-        ['Transport',     'expense', 'train',             '#F5EEF8', false, 18],
-        ['Travel',        'expense', 'flight',            '#FDEDEC', false, 19],
-        ['Awards',        'income',  'emoji_events',      '#CAFFBF', false, 20],
-        ['Coupons',       'income',  'local_offer',       '#9BF6FF', false, 21],
-        ['Grants',        'income',  'school',            '#FFFFBA', false, 22],
-        ['Lottery',       'income',  'casino',            '#FFCAD4', false, 23],
-        ['Refunds',       'income',  'receipt_long',      '#A0C4FF', false, 24],
-        ['Rental',        'income',  'home',              '#D8B4FE', false, 25],
-        ['Salary',        'income',  'payments',          '#B9FBC0', false, 26],
-        ['Sold Items',    'income',  'storefront',        '#FBF8CC', false, 27]
+        ['Bills', 'expense', 'receipt_long', '#FFDFBA', false, 1],
+        ['Car', 'expense', 'directions_car', '#BDB2FF', false, 2],
+        ['Clothes', 'expense', 'checkroom', '#FFC6FF', false, 3],
+        ['Communication', 'expense', 'chat', '#FFFFFC', false, 4],
+        ['Eating Out', 'expense', 'restaurant', '#E8F0FE', false, 5],
+        ['Entertainment', 'expense', 'theater_comedy', '#D6E4FF', false, 6],
+        ['Food', 'expense', 'restaurant', '#EAF2F8', false, 7],
+        ['Gifts', 'expense', 'featured_play_list', '#F5EEF8', false, 8],
+        ['Health', 'expense', 'medical_services', '#FDEDEC', false, 9],
+        ['House', 'expense', 'home', '#FEF9E7', false, 10],
+        ['Insurance', 'expense', 'shield', '#EAFAF1', false, 11],
+        ['Interest', 'expense', 'percent', '#F4ECF7', false, 12],
+        ['Medical', 'expense', 'vaccines', '#FDEDEC', false, 13],
+        ['Pets', 'expense', 'pets', '#FBEEE6', false, 14],
+        ['Sports', 'expense', 'sports_soccer', '#EBF5FB', false, 15],
+        ['Taxi', 'expense', 'local_taxi', '#FEF9E7', false, 16],
+        ['Toiletry', 'expense', 'soap', '#EAF2F8', false, 17],
+        ['Transport', 'expense', 'train', '#F5EEF8', false, 18],
+        ['Travel', 'expense', 'flight', '#FDEDEC', false, 19],
+        ['Awards', 'income', 'emoji_events', '#CAFFBF', false, 20],
+        ['Coupons', 'income', 'local_offer', '#9BF6FF', false, 21],
+        ['Grants', 'income', 'school', '#FFFFBA', false, 22],
+        ['Lottery', 'income', 'casino', '#FFCAD4', false, 23],
+        ['Refunds', 'income', 'receipt_long', '#A0C4FF', false, 24],
+        ['Rental', 'income', 'home', '#D8B4FE', false, 25],
+        ['Salary', 'income', 'payments', '#B9FBC0', false, 26],
+        ['Sold Items', 'income', 'storefront', '#FBF8CC', false, 27]
       ];
       for (const cat of defaultCategories) {
         await client.query(
