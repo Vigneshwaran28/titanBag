@@ -6,6 +6,14 @@ const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
   console.error("WARNING: DATABASE_URL environment variable is not defined in .env! Database connection will fail.");
+} else {
+  const credentialsPart = connectionString.split('@')[0];
+  if (credentialsPart && credentialsPart.includes('://')) {
+    const userPasswordPart = credentialsPart.split('://')[1];
+    if (userPasswordPart && !userPasswordPart.includes(':')) {
+      console.error("ERROR: The DATABASE_URL connection string does not contain a password. This will fail SCRAM authentication on the database server.");
+    }
+  }
 }
 
 const pool = new Pool({
