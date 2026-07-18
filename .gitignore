@@ -1,5 +1,5 @@
 node_modules/
 .env
 *.log
-frontend/
-.agents/
+frontend/node_modules
+.agents

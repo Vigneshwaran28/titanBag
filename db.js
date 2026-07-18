@@ -1,383 +1,42 @@
 require('dotenv').config();
 const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
 
+// Grab connection string from database (Port: 5432 direct / 6543 pooler)
 const connectionString = process.env.DATABASE_URL;
 
 if (!connectionString) {
-  console.error("WARNING: DATABASE_URL environment variable is not defined in .env! Database connection will fail.");
-} else {
-  const credentialsPart = connectionString.split('@')[0];
-  if (credentialsPart && credentialsPart.includes('://')) {
-    const userPasswordPart = credentialsPart.split('://')[1];
-    if (userPasswordPart && !userPasswordPart.includes(':')) {
-      console.error("ERROR: The DATABASE_URL connection string does not contain a password. This will fail SCRAM authentication on the database server.");
-    }
-  }
+  console.error("CRITICAL CONFIG ERROR: DATABASE_URL variable is missing in .env! Database connectivity will crash.");
 }
 
 const pool = new Pool({
   connectionString: connectionString,
-  ssl: connectionString && connectionString.includes('neon.tech') ? { rejectUnauthorized: false } : false
+  // Database connections over SSL are mandatory natively
+  ssl: { rejectUnauthorized: false },
+  max: 10,                  // Optimal concurrent pool limits for hosting targets
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// initializeDatabase
-// Creates ALL tables in dependency order (parent tables before child tables)
-// with full foreign key constraints rooted at the `users` table.
-// Also seeds default data (godUser, sample users, categories).
-// ─────────────────────────────────────────────────────────────────────────────
-async function initializeDatabase() {
+// Set search_path to piggybag schema on every new pool connection
+pool.on('connect', (client) => {
+  client.query('SET search_path TO piggybag');
+});
+
+// Seed defaults cleanly inside database
+async function seedDefaultCategories() {
   const client = await pool.connect();
   try {
-    console.log("Initializing database tables if they do not exist...");
-
-    // Enable extensions
-    await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto;`);
-
-    // ─── 1. USERS (Root / Parent Table) ─────────────────────────────────────
-    // All other user-scoped tables reference users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS users (
-        id                  UUID PRIMARY KEY,
-        username            VARCHAR(100) UNIQUE NOT NULL,
-        email               VARCHAR(100) UNIQUE NOT NULL,
-        display_name        VARCHAR(100) NOT NULL,
-        password_hash       VARCHAR(255) NOT NULL,
-        partner_share_code  VARCHAR(100) UNIQUE NOT NULL,
-        profile_photo       TEXT DEFAULT NULL,
-        auth_token          TEXT DEFAULT NULL,
-        ip_address          VARCHAR(45),
-        location            VARCHAR(255),
-        device_model        VARCHAR(100),
-        device_manufacturer VARCHAR(100),
-        created_at          TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at          TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        last_login          TIMESTAMP WITH TIME ZONE
-      );
-    `);
-
-    // ─── 2. PARTNERS ─────────────────────────────────────────────────────────
-    // Links two users bidirectionally. Both columns FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS partners (
-        id           UUID PRIMARY KEY,
-        user_one_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        user_two_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        connected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        status       VARCHAR(50) DEFAULT 'active'
-      );
-    `);
-
-    // ─── 3. JOURNALS ─────────────────────────────────────────────────────────
-    // Personal expense journal entries synced offline-first.
-    // owner_id FK → users(id). shared_partner_id nullable FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS journals (
-        id                UUID PRIMARY KEY,
-        owner_id          UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        shared_partner_id UUID REFERENCES users(id) ON DELETE SET NULL,
-        title             VARCHAR(255) NOT NULL,
-        amount            NUMERIC(15, 2) NOT NULL,
-        type              VARCHAR(20) DEFAULT 'expense', -- credit, debit, income, expense
-        category          VARCHAR(100) NOT NULL,
-        notes             TEXT,
-        payment_method    VARCHAR(100),
-        location          VARCHAR(255),
-        date              TIMESTAMP WITH TIME ZONE NOT NULL,
-        created_at        TIMESTAMP WITH TIME ZONE NOT NULL,
-        updated_at        TIMESTAMP WITH TIME ZONE NOT NULL,
-        deleted           BOOLEAN DEFAULT FALSE
-      );
-    `);
-
-    // ─── 4. PASSWORD RESETS ──────────────────────────────────────────────────
-    // Stores one-time tokens for email-based password reset flow.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS password_resets (
-        id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        token      VARCHAR(255) UNIQUE NOT NULL,
-        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
-        used       BOOLEAN DEFAULT FALSE
-      );
-    `);
-
-    // ─── 5. GOD USER (Admin) ─────────────────────────────────────────────────
-    // Standalone admin table — not linked to users table by design.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS "godUser" (
-        "id"           INTEGER PRIMARY KEY GENERATED BY DEFAULT AS IDENTITY,
-        "super_user"   TEXT UNIQUE,
-        "authenticate" UUID DEFAULT gen_random_uuid(),
-        "rank_id"      INTEGER
-      );
-    `);
-
-    // Enable Row Level Security on godUser safely
-    try {
-      await client.query(`ALTER TABLE "godUser" ENABLE ROW LEVEL SECURITY;`);
-    } catch (rlsErr) {
-      console.warn("Could not enable RLS on godUser:", rlsErr.message);
-    }
-
-    // ─── 6. DEVICE REGISTER ──────────────────────────────────────────────────
-    // Tracks registered devices per user. Upserts on (user_id, device_id) conflict.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS device_register (
-        id            UUID PRIMARY KEY,
-        user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        device_id     VARCHAR(255) NOT NULL,
-        device_name   VARCHAR(255) NOT NULL,
-        device_model  VARCHAR(255) NOT NULL,
-        registered_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE (user_id, device_id)
-      );
-    `);
-
-    // ─── 7. SHARED JOURNALS ──────────────────────────────────────────────────
-    // Group expense journals. creator_id FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS shared_journals (
-        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        creator_id  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        title       VARCHAR(255) NOT NULL,
-        description TEXT,
-        start_date  DATE,
-        end_date    DATE,
-        currency    VARCHAR(10) DEFAULT '₹',
-        join_token  VARCHAR(255) UNIQUE,
-        created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    // ─── 8. JOURNAL MEMBERS ──────────────────────────────────────────────────
-    // Junction table: shared_journals ↔ users.
-    // journal_id FK → shared_journals(id), user_id FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS journal_members (
-        journal_id UUID NOT NULL REFERENCES shared_journals(id) ON DELETE CASCADE,
-        user_id    UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        role       VARCHAR(50) DEFAULT 'member',
-        joined_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (journal_id, user_id)
-      );
-    `);
-
-    // ─── 9. JOURNAL TRANSACTIONS ─────────────────────────────────────────────
-    // Transactions inside a shared journal.
-    // journal_id FK → shared_journals(id), paid_by FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS journal_transactions (
-        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        journal_id  UUID NOT NULL REFERENCES shared_journals(id) ON DELETE CASCADE,
-        paid_by     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        amount      NUMERIC(15, 2) NOT NULL,
-        category    VARCHAR(100) NOT NULL,
-        description VARCHAR(255),
-        date        TIMESTAMP WITH TIME ZONE NOT NULL,
-        type        VARCHAR(20) DEFAULT 'expense',
-        notes       TEXT,
-        created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    // ─── 10. CATEGORIES ──────────────────────────────────────────────────────
-    // Shared/default categories — no user_id FK (global lookup table).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS categories (
-        id          SERIAL PRIMARY KEY,
-        name        VARCHAR(100) NOT NULL,
-        type        VARCHAR(20) NOT NULL,   -- 'income' or 'expense'
-        icon        VARCHAR(50),
-        color       VARCHAR(20),
-        is_default  BOOLEAN DEFAULT FALSE,
-        order_index INTEGER DEFAULT 0
-      );
-    `);
-
-    // ─── 11. ACCOUNTS ────────────────────────────────────────────────────────
-    // Per-user wallet/bank accounts. user_id FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS accounts (
-        id              SERIAL PRIMARY KEY,
-        user_id         UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        name            VARCHAR(100) NOT NULL,
-        type            VARCHAR(50) NOT NULL,  -- Cash, Bank Account, UPI, Credit Card, etc.
-        opening_balance NUMERIC(15, 2) DEFAULT 0.00,
-        current_balance NUMERIC(15, 2) DEFAULT 0.00,
-        icon            VARCHAR(50),
-        color           VARCHAR(20)
-      );
-    `);
-
-    // ─── 12. BUDGETS ─────────────────────────────────────────────────────────
-    // Per-user monthly/custom budgets. user_id FK → users(id).
-    // category_id nullable FK → categories(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS budgets (
-        id            SERIAL PRIMARY KEY,
-        user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        category_id   INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-        budget_amount NUMERIC(15, 2) NOT NULL,
-        month         INTEGER NOT NULL,  -- 1-12
-        year          INTEGER NOT NULL,
-        budget_type   VARCHAR(50) DEFAULT 'MONTHLY',  -- MONTHLY, WEEKLY, CUSTOM
-        start_date    TIMESTAMP WITH TIME ZONE,
-        end_date      TIMESTAMP WITH TIME ZONE,
-        budget_name   VARCHAR(100)
-      );
-    `);
-
-    // ─── 13. SAVINGS GOALS ───────────────────────────────────────────────────
-    // Per-user savings targets. user_id FK → users(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS savings_goals (
-        id             SERIAL PRIMARY KEY,
-        user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        title          VARCHAR(255) NOT NULL,
-        target_amount  NUMERIC(15, 2) NOT NULL,
-        current_amount NUMERIC(15, 2) DEFAULT 0.00,
-        target_date    VARCHAR(50),   -- ISO-8601 string from Android
-        status         VARCHAR(50) DEFAULT 'active',  -- active, completed
-        icon           VARCHAR(50),
-        color          VARCHAR(20)
-      );
-    `);
-
-    // ─── 14. RECURRING TRANSACTIONS ──────────────────────────────────────────
-    // Per-user recurring expense/income rules.
-    // user_id FK → users(id). category_id + account_id nullable FK.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS recurring_transactions (
-        id                  SERIAL PRIMARY KEY,
-        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        amount              NUMERIC(15, 2) NOT NULL,
-        type                VARCHAR(20) NOT NULL,  -- income or expense
-        category_id         INTEGER REFERENCES categories(id) ON DELETE SET NULL,
-        account_id          INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
-        note                TEXT,
-        frequency           VARCHAR(50) NOT NULL,  -- daily, weekly, monthly, yearly
-        next_execution_date VARCHAR(50),            -- ISO-8601 string from Android
-        enabled             BOOLEAN DEFAULT TRUE
-      );
-    `);
-
-    // ─── 15. BANK ACCOUNTS ───────────────────────────────────────────────────
-    // SMS-parsed bank accounts. Standalone — no user FK (local-only sync data).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS bank_accounts (
-        id              VARCHAR(100) PRIMARY KEY,
-        account_number  VARCHAR(50) NOT NULL,
-        bank_name       VARCHAR(100) NOT NULL,
-        current_balance NUMERIC(15, 2) DEFAULT 0.00,
-        updated_at      TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      );
-    `);
-
-    // ─── 16. BANK TRANSACTIONS ───────────────────────────────────────────────
-    // SMS-parsed bank transactions. account_id FK → bank_accounts(id).
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS bank_transactions (
-        id               VARCHAR(100) PRIMARY KEY,
-        account_id       VARCHAR(100) REFERENCES bank_accounts(id) ON DELETE CASCADE,
-        amount           NUMERIC(15, 2) NOT NULL,
-        type             VARCHAR(20) NOT NULL,  -- CREDIT or DEBIT
-        raw_message      TEXT,
-        transaction_date TIMESTAMP WITH TIME ZONE,
-        merchant         VARCHAR(255)
-      );
-    `);
-
-    // ─── 17. SETTINGS ────────────────────────────────────────────────────────
-    // One row per user. user_id UNIQUE FK → users(id).
-    // Matches Android Room Settings entity fields exactly.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        id                   SERIAL PRIMARY KEY,
-        user_id              UUID UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        theme_mode           VARCHAR(20) DEFAULT 'system',     -- system, light, dark
-        currency             VARCHAR(10) DEFAULT '₹',
-        pin_enabled          BOOLEAN DEFAULT FALSE,
-        biometric_enabled    BOOLEAN DEFAULT FALSE,
-        notifications_enabled BOOLEAN DEFAULT TRUE,
-        debt_list_enabled    BOOLEAN DEFAULT TRUE,
-        color_palette        VARCHAR(50) DEFAULT 'Default',
-        custom_color         VARCHAR(50) DEFAULT NULL,
-        custom_icon_color    VARCHAR(50) DEFAULT NULL,
-        custom_bg_color      VARCHAR(50) DEFAULT NULL
-      );
-    `);
-
-    // ─── 18. DEBT RECORDS ────────────────────────────────────────────────────
-    // Per-user debt/credit tracking. user_id FK → users(id).
-    // Date fields kept as VARCHAR to match Android string timestamps.
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS debt_records (
-        id                  UUID PRIMARY KEY,
-        user_id             UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        person_name         VARCHAR(100) NOT NULL,
-        borrowed_date       VARCHAR(50) NOT NULL,   -- ISO-8601 string from Android
-        action              VARCHAR(20) NOT NULL,   -- 'Debt' (borrowed) or 'Credit' (lent)
-        amount              NUMERIC(15, 2) NOT NULL,
-        remainder_boolean   BOOLEAN DEFAULT FALSE,
-        date_timestamp      VARCHAR(50),            -- reminder datetime string
-        returned_date       VARCHAR(50),            -- settlement date string
-        status              VARCHAR(50) DEFAULT 'Pending',  -- Pending, Completed
-        mode_of_transaction VARCHAR(50) DEFAULT 'Cash'
-      );
-    `);
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // SEED DATA
-    // ─────────────────────────────────────────────────────────────────────────
-
-    // Seed default god user if table is empty
-    const checkGod = await client.query('SELECT "id" FROM "godUser" LIMIT 1');
-    if (checkGod.rows.length === 0) {
-      const defaultUuid = '00000000-0000-0000-0000-000000000000';
-      await client.query(
-        'INSERT INTO "godUser" ("super_user", "authenticate", "rank_id") VALUES ($1, $2, $3)',
-        ['admin', defaultUuid, 1]
-      );
-      console.log(`Seeded default god user (super_user: 'admin', authenticate: '${defaultUuid}')`);
-    }
-
-    // Seed default sample users if table is empty
-
-    // Seed default categories if table is empty
-    const checkCategories = await client.query('SELECT id FROM categories LIMIT 1');
+    // Explicitly set schema for this client session (avoids race with on('connect'))
+    await client.query('SET search_path TO piggybag');
+    const checkCategories = await client.query('SELECT id FROM categories WHERE is_default = true LIMIT 1');
     if (checkCategories.rows.length === 0) {
+      console.log("Seeding base global default categories into database...");
       const defaultCategories = [
-        ['Bills', 'expense', 'receipt_long', '#FFDFBA', false, 1],
-        ['Car', 'expense', 'directions_car', '#BDB2FF', false, 2],
-        ['Clothes', 'expense', 'checkroom', '#FFC6FF', false, 3],
-        ['Communication', 'expense', 'chat', '#FFFFFC', false, 4],
-        ['Eating Out', 'expense', 'restaurant', '#E8F0FE', false, 5],
-        ['Entertainment', 'expense', 'theater_comedy', '#D6E4FF', false, 6],
-        ['Food', 'expense', 'restaurant', '#EAF2F8', false, 7],
-        ['Gifts', 'expense', 'featured_play_list', '#F5EEF8', false, 8],
-        ['Health', 'expense', 'medical_services', '#FDEDEC', false, 9],
-        ['House', 'expense', 'home', '#FEF9E7', false, 10],
-        ['Insurance', 'expense', 'shield', '#EAFAF1', false, 11],
-        ['Interest', 'expense', 'percent', '#F4ECF7', false, 12],
-        ['Medical', 'expense', 'vaccines', '#FDEDEC', false, 13],
-        ['Pets', 'expense', 'pets', '#FBEEE6', false, 14],
-        ['Sports', 'expense', 'sports_soccer', '#EBF5FB', false, 15],
-        ['Taxi', 'expense', 'local_taxi', '#FEF9E7', false, 16],
-        ['Toiletry', 'expense', 'soap', '#EAF2F8', false, 17],
-        ['Transport', 'expense', 'train', '#F5EEF8', false, 18],
-        ['Travel', 'expense', 'flight', '#FDEDEC', false, 19],
-        ['Awards', 'income', 'emoji_events', '#CAFFBF', false, 20],
-        ['Coupons', 'income', 'local_offer', '#9BF6FF', false, 21],
-        ['Grants', 'income', 'school', '#FFFFBA', false, 22],
-        ['Lottery', 'income', 'casino', '#FFCAD4', false, 23],
-        ['Refunds', 'income', 'receipt_long', '#A0C4FF', false, 24],
-        ['Rental', 'income', 'home', '#D8B4FE', false, 25],
-        ['Salary', 'income', 'payments', '#B9FBC0', false, 26],
-        ['Sold Items', 'income', 'storefront', '#FBF8CC', false, 27]
+        ['Food',     'expense', 'restaurant',    '#EAF2F8', true, 1],
+        ['Travel',   'expense', 'flight',         '#FDEDEC', true, 2],
+        ['Salary',   'income',  'payments',        '#B9FBC0', true, 3],
+        ['Shopping', 'expense', 'checkroom',       '#FFC6FF', true, 4],
+        ['Bills',    'expense', 'receipt_long',    '#FFDFBA', true, 5]
       ];
       for (const cat of defaultCategories) {
         await client.query(
@@ -385,43 +44,9 @@ async function initializeDatabase() {
           cat
         );
       }
-      console.log("Seeded default categories in database.");
     }
-
-    console.log("Database tables checked and initialized successfully.");
   } catch (err) {
-    console.error("Error initializing database tables:", err);
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// updateSchema
-// Safe migration runner for additive changes only (ADD COLUMN IF NOT EXISTS).
-// New columns added after the initial schema was deployed go here.
-// Never drop or rename columns here — do that in a separate migration.
-// ─────────────────────────────────────────────────────────────────────────────
-async function updateSchema() {
-  const client = await pool.connect();
-  try {
-    console.log("Running schema migration checks...");
-
-    // Migration: ensure any columns that may have been added after an old
-    // initializeDatabase() run are present. Safe to run on any environment.
-    await client.query(`
-      ALTER TABLE users     ADD COLUMN IF NOT EXISTS profile_photo  TEXT DEFAULT NULL;
-      ALTER TABLE users     ADD COLUMN IF NOT EXISTS auth_token     TEXT DEFAULT NULL;
-      ALTER TABLE settings  ADD COLUMN IF NOT EXISTS debt_list_enabled BOOLEAN DEFAULT TRUE;
-      ALTER TABLE settings  ADD COLUMN IF NOT EXISTS custom_color   VARCHAR(50) DEFAULT NULL;
-      ALTER TABLE settings  ADD COLUMN IF NOT EXISTS custom_icon_color VARCHAR(50) DEFAULT NULL;
-      ALTER TABLE settings  ADD COLUMN IF NOT EXISTS custom_bg_color VARCHAR(50) DEFAULT NULL;
-    `);
-
-    console.log("Schema migration checks completed successfully.");
-  } catch (err) {
-    console.error("Error during schema migration:", err);
+    console.error("Error patching category records seed metadata:", err);
   } finally {
     client.release();
   }
@@ -429,6 +54,5 @@ async function updateSchema() {
 
 module.exports = {
   pool,
-  initializeDatabase,
-  updateSchema
+  seedDefaultCategories
 };

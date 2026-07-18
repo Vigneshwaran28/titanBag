@@ -1,0 +1,125 @@
+<div class="auth-page">
+  <div class="back-home-container">
+    <a routerLink="/" class="back-link">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+      Back to Home
+    </a>
+  </div>
+
+  <div class="auth-card card">
+    <div class="logo-section">
+      <div class="logo-icon-box">
+        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      </div>
+      <h2 class="auth-title">TitanBag Auth</h2>
+      <p class="auth-subtitle">Verify credentials to synchronize database logs</p>
+    </div>
+
+    <!-- Tabs header -->
+    <div class="tabs-header">
+      <button class="tab-btn" [class.active]="activeTab === 'login'" (click)="switchTab('login')">Sign In</button>
+      <button class="tab-btn" [class.active]="activeTab === 'register'" (click)="switchTab('register')">Register</button>
+      <button class="tab-btn admin" [class.active]="activeTab === 'admin'" (click)="switchTab('admin')">Admin Portal</button>
+    </div>
+
+    <!-- Error Alert Box -->
+    <div class="alert-error" *ngIf="errorMessage">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+      <span>{{ errorMessage }}</span>
+    </div>
+
+    <!-- Tab 1: Normal Login -->
+    <form *ngIf="activeTab === 'login'" (submit)="handleLogin($event)">
+      <div class="form-group">
+        <label class="form-label" for="login-id">Username or Email</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <input type="text" id="login-id" name="loginIdentity" class="form-input" [(ngModel)]="loginIdentity" placeholder="Enter username or email" required autocomplete="username">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="login-pwd">Password</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <input type="password" id="login-pwd" name="loginPassword" class="form-input" [(ngModel)]="loginPassword" placeholder="Enter password" required autocomplete="current-password">
+        </div>
+      </div>
+      <div class="forgot-pwd-link-container" style="text-align: right; margin-top: -0.5rem; margin-bottom: 1rem;">
+        <a routerLink="/forgot-password" style="font-size: 0.75rem; color: #818cf8; text-decoration: none;">Forgot Password?</a>
+      </div>
+
+      <button type="submit" class="btn-submit" [disabled]="isSubmitting">
+        <span *ngIf="!isSubmitting">Sign In to Wallet</span>
+        <span *ngIf="isSubmitting" class="loader-dot"></span>
+        <span *ngIf="isSubmitting">Connecting...</span>
+      </button>
+    </form>
+
+    <!-- Tab 2: User Register -->
+    <form *ngIf="activeTab === 'register'" (submit)="handleRegister($event)">
+      <div class="form-group">
+        <label class="form-label" for="reg-name">Display Name</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+          <input type="text" id="reg-name" name="regDisplayName" class="form-input" [(ngModel)]="regDisplayName" placeholder="Enter display name" required autocomplete="name">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="reg-uname">Username</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/></svg>
+          <input type="text" id="reg-uname" name="regUsername" class="form-input" [(ngModel)]="regUsername" placeholder="Select unique username" required autocomplete="username">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="reg-mail">Email Address</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+          <input type="email" id="reg-mail" name="regEmail" class="form-input" [(ngModel)]="regEmail" placeholder="Enter email address" required autocomplete="email">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="reg-pwd">Password</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <input type="password" id="reg-pwd" name="regPassword" class="form-input" [(ngModel)]="regPassword" placeholder="At least 8 characters" required autocomplete="new-password">
+        </div>
+      </div>
+
+      <button type="submit" class="btn-submit" [disabled]="isSubmitting">
+        <span *ngIf="!isSubmitting">Create My Wallet</span>
+        <span *ngIf="isSubmitting" class="loader-dot"></span>
+        <span *ngIf="isSubmitting">Registering...</span>
+      </button>
+    </form>
+
+    <!-- Tab 3: Admin Login -->
+    <form *ngIf="activeTab === 'admin'" (submit)="handleAdminLogin($event)">
+      <div class="form-group">
+        <label class="form-label" for="adm-id">Super User</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          <input type="text" id="adm-id" name="adminSuperUser" class="form-input" [(ngModel)]="adminSuperUser" placeholder="Enter super_user" required autocomplete="username">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="adm-pwd">Authenticate Key (UUID)</label>
+        <div class="input-wrapper">
+          <svg class="input-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+          <input type="password" id="adm-pwd" name="adminAuthKey" class="form-input" [(ngModel)]="adminAuthKey" placeholder="00000000-0000-0000-0000-000000000000" required>
+        </div>
+      </div>
+
+      <button type="submit" class="btn-submit admin" [disabled]="isSubmitting">
+        <span *ngIf="!isSubmitting">Authorize Mainframe Access</span>
+        <span *ngIf="isSubmitting" class="loader-dot"></span>
+        <span *ngIf="isSubmitting">Securing Tunnel...</span>
+      </button>
+    </form>
+  </div>
+</div>

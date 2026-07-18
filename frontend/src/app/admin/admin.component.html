@@ -1,0 +1,178 @@
+<div class="admin-page">
+  <!-- Nav Bar -->
+  <nav class="navbar">
+    <div class="logo-container">
+      <div class="logo-icon">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <span class="logo-text">TitanBag Admin Mainframe</span>
+    </div>
+    
+    <div class="nav-actions">
+      <a routerLink="/" class="btn btn-home">Home Portal</a>
+      <button class="btn btn-logout" (click)="logout()">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>
+        Sign Out
+      </button>
+    </div>
+  </nav>
+
+  <main class="main-content">
+    <!-- Telemetry Cards -->
+    <div class="telemetry-section" *ngIf="systemInfo">
+      <div class="card telemetry-card">
+        <div class="card-label">Server Uptime</div>
+        <div class="card-value">{{ systemInfo.uptime }}s</div>
+      </div>
+      <div class="card telemetry-card">
+        <div class="card-label">Node Runtime</div>
+        <div class="card-value">{{ systemInfo.node_version }}</div>
+      </div>
+      <div class="card telemetry-card">
+        <div class="card-label">Server OS Platform</div>
+        <div class="card-value">{{ systemInfo.platform }}</div>
+      </div>
+      <div class="card telemetry-card">
+        <div class="card-label">System Memory</div>
+        <div class="card-value">{{ systemInfo.memory.free }} / {{ systemInfo.memory.total }}</div>
+      </div>
+      <div class="card telemetry-card">
+        <div class="card-label">Database Connection</div>
+        <div class="card-value" [style.color]="systemInfo.database.includes('Connected') ? '#34d399' : '#f59e0b'">
+          {{ systemInfo.database }}
+        </div>
+      </div>
+    </div>
+
+    <!-- Active Client Sync Directory -->
+    <div class="card admin-panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Active Synchronized User Devices</h3>
+        <div class="search-wrapper">
+          <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" x2="16.65" y1="21" y2="16.65"/></svg>
+          <input type="text" class="search-input" placeholder="Search by name, hardware, maker..." [(ngModel)]="searchQuery">
+        </div>
+      </div>
+
+      <div *ngIf="isLoading" class="loader-container">
+        <div class="spinner"></div>
+        <span>Syncing telemetry registry database...</span>
+      </div>
+
+      <!-- Table -->
+      <div class="table-container" *ngIf="!isLoading">
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Client User</th>
+              <th>Device Manufacturer</th>
+              <th>Hardware Model</th>
+              <th>Last Synchronized Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr *ngFor="let user of getFilteredUsers()">
+              <td class="username-td">&#64;{{ user.username }}</td>
+              <td>{{ user.device_manufacturer || 'N/A' }}</td>
+              <td class="model-td">{{ user.device_model || 'N/A' }}</td>
+              <td>{{ user.updated_at | date:'medium' }}</td>
+            </tr>
+            <tr *ngIf="getFilteredUsers().length === 0">
+              <td colspan="4" class="empty-state">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>
+                <div>No connected sync nodes found matching filter.</div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Email Diagnostics Section -->
+    <div class="card email-diagnostics-panel">
+      <div class="panel-header">
+        <h3 class="panel-title">Resend Email Diagnostics Console</h3>
+        <span class="diagnostic-badge">Service Health Check</span>
+      </div>
+
+      <div class="email-form-grid">
+        <div class="form-group">
+          <label for="recipient-email">Recipient Email Address</label>
+          <div class="input-wrapper">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="input-icon"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+            <input type="email" id="recipient-email" class="form-input" placeholder="e.g. administrator@gmail.com" [(ngModel)]="testEmailTo">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="email-subject">Email Subject Header</label>
+          <div class="input-wrapper">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="input-icon"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            <input type="text" id="email-subject" class="form-input" placeholder="Enter email subject..." [(ngModel)]="testEmailSubject">
+          </div>
+        </div>
+      </div>
+
+      <!-- Notepad++ Editor -->
+      <div class="npp-editor-container">
+        <!-- Title bar -->
+        <div class="npp-titlebar">
+          <div class="window-controls">
+            <span class="control-dot close"></span>
+            <span class="control-dot minimize"></span>
+            <span class="control-dot maximize"></span>
+          </div>
+          <div class="editor-tabs">
+            <div class="editor-tab active">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="tab-icon"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              <span class="tab-title">test_email.html</span>
+              <span class="tab-close">✕</span>
+            </div>
+          </div>
+          <div class="editor-encoding">HTML Document | UTF-8</div>
+        </div>
+
+        <!-- Editor Work Area -->
+        <div class="npp-workarea">
+          <!-- Line Numbers -->
+          <div class="npp-line-numbers">
+            <div class="line-no" *ngFor="let num of getLineNumbers()">{{ num }}</div>
+          </div>
+          
+          <!-- Textarea Code Input -->
+          <div class="npp-textarea-wrapper">
+            <textarea class="npp-textarea" spellcheck="false" placeholder="Write email HTML body template here..." [(ngModel)]="testEmailHtml"></textarea>
+          </div>
+        </div>
+
+        <!-- Editor Status bar -->
+        <div class="npp-statusbar">
+          <div class="status-left">Ready</div>
+          <div class="status-right">Ln {{ testEmailHtml.split('\n').length }}, Col 1 | Sel 0 | Windows (CRLF) | ANSI</div>
+        </div>
+      </div>
+
+      <!-- Action Button and Results -->
+      <div class="action-footer">
+        <button class="btn btn-send-diagnostic" [disabled]="isSendingEmail" (click)="sendTestEmail()">
+          <span class="spinner-small" *ngIf="isSendingEmail"></span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" *ngIf="!isSendingEmail"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          {{ isSendingEmail ? 'Dispatching diagnostics test...' : 'Send Test Diagnostic Email' }}
+        </button>
+
+        <!-- Response Console -->
+        <div class="console-response-box" *ngIf="emailSendResult" [ngClass]="{'success': emailSendResult.success, 'error': !emailSendResult.success}">
+          <div class="console-header">
+            <span class="console-title">Diagnostic Console Output</span>
+            <span class="console-status-dot"></span>
+          </div>
+          <pre class="console-output">{{ emailSendResult.message }}</pre>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <p>TitanBag Secured God-User Mainframe Console. Confidential Internal Administration Only.</p>
+  </footer>
+</div>

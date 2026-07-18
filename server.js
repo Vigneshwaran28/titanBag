@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const { Resend } = require('resend');
-const { pool, initializeDatabase, updateSchema } = require('./db');
+const { pool, seedDefaultCategories } = require('./db');
 
 const resend = new Resend(process.env.RESEND_MAIL || 're_placeholder_local_testing');
 
@@ -33,21 +33,22 @@ function getClientIp(req) {
   return req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress;
 }
 
-// Endpoint: POST /login/google
 // Helper to record registered device in device_register table
 async function registerDevice(userId, req) {
   try {
-    const { device_id, device_model, device_manufacturer } = req.body;
+    const { device_id, device_model, device_manufacturer, os_version, app_version } = req.body;
     if (device_id) {
-      const id = crypto.randomUUID();
       const deviceName = device_manufacturer ? `${device_manufacturer} ${device_model}` : (device_model || 'Unknown Device');
       await pool.query(
-        `INSERT INTO device_register (id, user_id, device_id, device_name, device_model)
-         VALUES ($1, $2, $3, $4, $5)
-         ON CONFLICT (user_id, device_id) DO UPDATE SET registered_at = NOW()`,
-        [id, userId, device_id, deviceName, device_model || 'Unknown']
+        `INSERT INTO device_register (user_id, device_id, device_name, manufacturer, model, os_version, app_version, last_active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+         ON CONFLICT (user_id, device_id) DO UPDATE SET
+           last_active  = NOW(),
+           os_version   = COALESCE($6, device_register.os_version),
+           app_version  = COALESCE($7, device_register.app_version)`,
+        [userId, device_id, deviceName, device_manufacturer || 'Unknown', device_model || 'Unknown', os_version || null, app_version || null]
       );
-      console.log(`Device registered: ${deviceName} (ID: ${device_id}) for User: ${userId}`);
+      console.log(`Device registered/updated: ${deviceName} (ID: ${device_id}) for User: ${userId}`);
     }
   } catch (err) {
     console.error("Device registration error:", err);
@@ -81,45 +82,44 @@ app.post('/login/google', async (req, res) => {
 
     if (userResult.rows.length === 0) {
       // Auto-register new Google user
-      const userId = crypto.randomUUID();
       const username = `google_${googleId.substring(0, 8)}`;
-      const partnerShareCode = generatePartnerCode();
       const timestamp = new Date();
 
       const insertResult = await pool.query(
-        `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, ip_address, location, device_model, device_manufacturer, profile_photo, auth_token, created_at, updated_at, last_login)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id, username, email, display_name, partner_share_code, profile_photo, created_at, updated_at`,
-        [userId, username, email.toLowerCase(), display_name || name, 'GOOGLE_AUTH_EXTERNAL', partnerShareCode, ipAddress, location, device_model, device_manufacturer, profile_photo || payload.picture, id_token, timestamp, timestamp, timestamp]
+        `INSERT INTO users (username, email, display_name, password_hash, profile_photo, created_at, updated_at, last_login)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING user_id, username, email, display_name, profile_photo, created_at, updated_at`,
+        [username, email.toLowerCase(), display_name || name, 'GOOGLE_AUTH_EXTERNAL', profile_photo || payload.picture, timestamp, timestamp, timestamp]
       );
       user = insertResult.rows[0];
     } else {
       user = userResult.rows[0];
-      // Update last login and device info
+      // Update last login
       const timestamp = new Date();
       const updatedResult = await pool.query(
         `UPDATE users 
-         SET last_login = $1, ip_address = $2, location = $3, device_model = $4, device_manufacturer = $5, profile_photo = COALESCE($6, profile_photo), auth_token = $7 
-         WHERE id = $8 
-         RETURNING id, username, email, display_name, partner_share_code, profile_photo, created_at, updated_at`,
-        [timestamp, ipAddress, location, device_model, device_manufacturer, profile_photo || payload.picture, id_token, user.id]
+         SET last_login = $1, profile_photo = COALESCE($2, profile_photo), updated_at = $3 
+         WHERE user_id = $4 
+         RETURNING user_id, username, email, display_name, profile_photo, created_at, updated_at`,
+        [timestamp, profile_photo || payload.picture, timestamp, user.user_id]
       );
       user = updatedResult.rows[0];
     }
 
     // Call device registration helper
-    await registerDevice(user.id, req);
+    await registerDevice(user.user_id, req);
 
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
+    const token = jwt.sign({ id: user.user_id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
     res.status(200).json({
       token,
+      is_new: userResult.rows.length === 0,
       user: {
-        id: user.id,
+        id: user.user_id,
         username: user.username,
         email: user.email,
         display_name: user.display_name,
         profile_photo: user.profile_photo,
-        partner_share_code: user.partner_share_code,
+        partner_share_code: getPartnerShareCode(user.user_id),
         created_at: user.created_at,
         updated_at: user.updated_at
       }
@@ -131,16 +131,17 @@ app.post('/login/google', async (req, res) => {
   }
 });
 
-// Helper: Generate invitation share code
-function generatePartnerCode() {
-  const uuid = crypto.randomUUID();
-  const hash = crypto.createHash('sha256').update(uuid).digest('hex').toUpperCase();
-  const p1 = hash.substring(0, 4);
-  const p2 = hash.substring(4, 8);
-  const p3 = hash.substring(8, 12);
-  const p4 = hash.substring(12, 16);
+// Helper: Get invitation share code deterministically from user_id to match Android segmented input format
+function getPartnerShareCode(userId) {
+  if (!userId) return '';
+  const cleanUuid = userId.replace(/-/g, '').toUpperCase();
+  const p1 = cleanUuid.substring(0, 4);
+  const p2 = cleanUuid.substring(4, 8);
+  const p3 = cleanUuid.substring(8, 12);
+  const p4 = cleanUuid.substring(12, 16);
   return `EXP-${p1}-${p2}-${p3}-${p4}`;
 }
+
 
 // Authentication Middleware
 function authenticateToken(req, res, next) {
@@ -180,7 +181,7 @@ function authenticateGodToken(req, res, next) {
 
 // Endpoint: POST /register
 app.post('/register', async (req, res) => {
-  const { username, email, password, display_name, device_model, device_manufacturer, device_id } = req.body;
+  const { username, email, password, display_name } = req.body;
 
   if (!username || !email || !password || !display_name) {
     return res.status(400).json({ message: "All fields are required" });
@@ -193,7 +194,7 @@ app.post('/register', async (req, res) => {
   try {
     // Check if user already exists
     const duplicateCheck = await pool.query(
-      "SELECT id FROM users WHERE username = $1 OR email = $2",
+      "SELECT user_id FROM users WHERE username = $1 OR email = $2",
       [username.trim().toLowerCase(), email.trim().toLowerCase()]
     );
 
@@ -201,27 +202,23 @@ app.post('/register', async (req, res) => {
       return res.status(400).json({ message: "Username or Email already registered" });
     }
 
-    const userId = crypto.randomUUID();
     const passwordHash = await bcrypt.hash(password, 10);
-    const partnerShareCode = generatePartnerCode();
     const timestamp = new Date();
-    const ipAddress = getClientIp(req);
-    const location = req.headers['x-vercel-ip-city'] || req.headers['cf-ipcity'] || 'Unknown';
 
     const result = await pool.query(
-      `INSERT INTO users (id, username, email, display_name, password_hash, partner_share_code, ip_address, location, device_model, device_manufacturer, created_at, updated_at, last_login)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id, username, email, display_name, partner_share_code, created_at, updated_at`,
-      [userId, username.trim().toLowerCase(), email.trim().toLowerCase(), display_name.trim(), passwordHash, partnerShareCode, ipAddress, location, device_model, device_manufacturer, timestamp, timestamp, timestamp]
+      `INSERT INTO users (username, email, display_name, password_hash, created_at, updated_at, last_login)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING user_id, username, email, display_name, created_at, updated_at`,
+      [username.trim().toLowerCase(), email.trim().toLowerCase(), display_name.trim(), passwordHash, timestamp, timestamp, timestamp]
     );
 
     const newUser = result.rows[0];
 
     // Register device
-    await registerDevice(newUser.id, req);
+    await registerDevice(newUser.user_id, req);
 
-    const token = jwt.sign({ id: newUser.id, username: newUser.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
+    const token = jwt.sign({ id: newUser.user_id, username: newUser.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
-    // HTML Welcome Page Layout
+    // Asynchronously send onboarding welcome email via Resend (non-blocking)
     const welcomeHtml = `
       <div style="background-color: #07090e; color: #f3f4f6; font-family: 'Inter', Helvetica, Arial, sans-serif; padding: 40px 20px; text-align: center; border-radius: 12px; max-width: 600px; margin: 0 auto; border: 1px solid #1e2633;">
         <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); width: 50px; height: 50px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center; margin-bottom: 20px; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); margin: 0 auto;">
@@ -232,28 +229,19 @@ app.post('/register', async (req, res) => {
           Hi ${newUser.display_name}, your offline-first personal wallet synchronization portal is ready. Easily manage and sync your expense journals securely.
         </p>
         <div style="background-color: #0f131a; border: 1px solid #1e2633; border-radius: 10px; padding: 20px; margin-bottom: 30px; text-align: left;">
-          <h3 style="color: #f3f4f6; margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #1e2633; padding-bottom: 10px; margin-bottom: 15px;">Your Connection Details</h3>
+          <h3 style="color: #f3f4f6; margin-top: 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #1e2633; padding-bottom: 10px; margin-bottom: 15px;">Your Account</h3>
           <div style="margin-bottom: 10px; font-size: 14px;">
             <span style="color: #9ca3af;">Username:</span>
             <strong style="color: #f3f4f6; float: right;">@${newUser.username}</strong>
           </div>
-          <div style="font-size: 14px;">
-            <span style="color: #9ca3af;">Invitation Share Code:</span>
-            <strong style="color: #818cf8; font-family: monospace; float: right;">${newUser.partner_share_code}</strong>
-          </div>
           <div style="clear: both;"></div>
         </div>
-        <div style="background-color: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.3); color: #fb7185; padding: 15px 20px; border-radius: 10px; font-size: 13px; text-align: left; line-height: 1.5; margin-bottom: 30px;">
-          <strong style="display: block; margin-bottom: 5px;">⚠️ SECURITY WARNING</strong>
-          Connecting with a partner using your invitation code allows them to view, edit, and automatically synchronize your personal expense journals. Only share this code with trusted partners.
-        </div>
         <div style="margin-top: 30px; border-top: 1px solid #1e2633; padding-top: 20px; color: #6b7280; font-size: 12px;">
-          TitanBag Secure Cloud Systems. Powered by Node.js & Neon Serverless PostgreSQL.
+          TitanBag Secure Cloud Systems. Powered by Node.js &amp; PostgreSQL.
         </div>
       </div>
     `;
 
-    // Asynchronously send onboarding welcome email via Resend (non-blocking)
     resend.emails.send({
       from: 'onboarding@resend.dev',
       to: newUser.email,
@@ -268,11 +256,11 @@ app.post('/register', async (req, res) => {
     res.status(201).json({
       token,
       user: {
-        id: newUser.id,
+        id: newUser.user_id,
         username: newUser.username,
         email: newUser.email,
         display_name: newUser.display_name,
-        partner_share_code: newUser.partner_share_code,
+        partner_share_code: getPartnerShareCode(newUser.user_id),
         created_at: newUser.created_at,
         updated_at: newUser.updated_at
       }
@@ -285,8 +273,10 @@ app.post('/register', async (req, res) => {
 });
 
 // Endpoint: POST /login
+
+
 app.post('/login', async (req, res) => {
-  const { identifier, password, device_model, device_manufacturer, device_id } = req.body;
+  const { identifier, password } = req.body;
 
   if (!identifier || !password) {
     return res.status(400).json({ message: "Identifier and password required" });
@@ -309,30 +299,27 @@ app.post('/login', async (req, res) => {
       return res.status(400).json({ message: "Invalid username/email or password" });
     }
 
-    // Update last login and device info
+    // Update last login timestamp
     const timestamp = new Date();
-    const ipAddress = getClientIp(req);
-    const location = req.headers['x-vercel-ip-city'] || req.headers['cf-ipcity'] || 'Unknown';
-
     await pool.query(
-      "UPDATE users SET last_login = $1, ip_address = $2, location = $3, device_model = $4, device_manufacturer = $5 WHERE id = $6",
-      [timestamp, ipAddress, location, device_model, device_manufacturer, user.id]
+      "UPDATE users SET last_login = $1, updated_at = $2 WHERE user_id = $3",
+      [timestamp, timestamp, user.user_id]
     );
 
     // Call device registration helper
-    await registerDevice(user.id, req);
+    await registerDevice(user.user_id, req);
 
-    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
+    const token = jwt.sign({ id: user.user_id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
 
     res.status(200).json({
       token,
       user: {
-        id: user.id,
+        id: user.user_id,
         username: user.username,
         email: user.email,
         display_name: user.display_name,
         profile_photo: user.profile_photo,
-        partner_share_code: user.partner_share_code,
+        partner_share_code: getPartnerShareCode(user.user_id),
         created_at: user.created_at,
         updated_at: user.updated_at,
         last_login: timestamp
@@ -353,7 +340,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
   }
 
   try {
-    const userResult = await pool.query("SELECT id, display_name FROM users WHERE email = $1", [email.trim().toLowerCase()]);
+    const userResult = await pool.query("SELECT user_id, display_name FROM users WHERE email = $1", [email.trim().toLowerCase()]);
     if (userResult.rows.length === 0) {
       // For security, do not leak whether email exists. Send success.
       return res.status(200).json({ message: "If that email exists, we have sent a link to reset your password." });
@@ -365,7 +352,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
 
     await pool.query(
       'INSERT INTO password_resets (user_id, token, expires_at) VALUES ($1, $2, $3)',
-      [user.id, token, expiresAt]
+      [user.user_id, token, expiresAt]
     );
 
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
@@ -432,10 +419,10 @@ app.post('/api/auth/reset-password', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
 
     // Update password
-    await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [passwordHash, resetRequest.user_id]);
+    await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE user_id = $2', [passwordHash, resetRequest.user_id]);
 
     // Mark token as used
-    await pool.query('UPDATE password_resets SET used = true WHERE id = $3', [resetRequest.id]);
+    await pool.query('UPDATE password_resets SET used = true WHERE id = $1', [resetRequest.id]);
 
     res.status(200).json({ message: "Password reset successfully. You can now log in." });
   } catch (err) {
@@ -444,24 +431,54 @@ app.post('/api/auth/reset-password', async (req, res) => {
   }
 });
 
+// Endpoint: POST /api/auth/set-password
+app.post('/api/auth/set-password', authenticateToken, async (req, res) => {
+  const { password } = req.body;
+  if (!password || password.length < 8) {
+    return res.status(400).json({ message: "Password must be at least 8 characters long." });
+  }
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    await pool.query('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE user_id = $2', [passwordHash, req.user.id]);
+    res.status(200).json({ success: true, message: "Password configured successfully." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error configuring password." });
+  }
+});
+
 // Endpoint: GET /profile
 app.get('/profile', authenticateToken, async (req, res) => {
   try {
-    const userResult = await pool.query("SELECT id, username, email, display_name, partner_share_code, created_at, updated_at, last_login FROM users WHERE id = $1", [req.user.id]);
+    const userResult = await pool.query(
+      "SELECT user_id, username, email, display_name, profile_photo, created_at, updated_at, last_login FROM users WHERE user_id = $1",
+      [req.user.id]
+    );
 
     if (userResult.rows.length === 0) {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const user = userResult.rows[0];
+    const dbUser = userResult.rows[0];
+    const user = {
+      id: dbUser.user_id,
+      username: dbUser.username,
+      email: dbUser.email,
+      display_name: dbUser.display_name,
+      profile_photo: dbUser.profile_photo,
+      partner_share_code: getPartnerShareCode(dbUser.user_id),
+      created_at: dbUser.created_at,
+      updated_at: dbUser.updated_at,
+      last_login: dbUser.last_login
+    };
 
     // Check for active partner
     const partnerResult = await pool.query(
-      `SELECT p.*, 
-              u.display_name as partner_display_name, 
+      `SELECT p.*,
+              u.display_name as partner_display_name,
               u.username as partner_username
        FROM partners p
-       JOIN users u ON (u.id = p.user_one_id OR u.id = p.user_two_id) AND u.id != $1
+       JOIN users u ON (u.user_id = p.user_one_id OR u.user_id = p.user_two_id) AND u.user_id != $1
        WHERE (p.user_one_id = $1 OR p.user_two_id = $1) AND p.status = 'active'
        LIMIT 1`,
       [req.user.id]
@@ -469,10 +486,7 @@ app.get('/profile', authenticateToken, async (req, res) => {
 
     const partner = partnerResult.rows.length > 0 ? partnerResult.rows[0] : null;
 
-    res.status(200).json({
-      user,
-      partner
-    });
+    res.status(200).json({ user, partner });
 
   } catch (err) {
     console.error(err);
@@ -481,52 +495,63 @@ app.get('/profile', authenticateToken, async (req, res) => {
 });
 
 // Endpoint: POST /partner/connect
+// Accepts partner_code or partner_share_code (username OR deterministically derived EXP share code)
 app.post('/partner/connect', authenticateToken, async (req, res) => {
-  const { partner_code } = req.body;
+  const partner_code = req.body.partner_code || req.body.partner_share_code;
 
   if (!partner_code) {
-    return res.status(400).json({ message: "Partner share code required" });
+    return res.status(400).json({ message: "Partner username or code required" });
   }
 
   try {
-    // 1. Find user by share code
-    const targetResult = await pool.query("SELECT id, display_name FROM users WHERE partner_share_code = $1", [partner_code.trim()]);
+    // 1. Find target user by username or derived share code prefix
+    let targetResult;
+    let cleanCode = partner_code.trim().toUpperCase();
+    if (cleanCode.startsWith('EXP')) {
+      const hexPrefix = cleanCode.substring(3).replace(/-/g, '').toLowerCase() + '%';
+      targetResult = await pool.query(
+        "SELECT user_id, display_name FROM users WHERE REPLACE(user_id::text, '-', '') LIKE $1",
+        [hexPrefix]
+      );
+    } else {
+      targetResult = await pool.query(
+        "SELECT user_id, display_name FROM users WHERE username = $1",
+        [partner_code.trim().toLowerCase()]
+      );
+    }
+
     if (targetResult.rows.length === 0) {
-      return res.status(404).json({ message: "Invalid share code. Partner not found." });
+      return res.status(404).json({ message: "Partner not found. Check the username/code and try again." });
     }
 
     const partnerUser = targetResult.rows[0];
 
-    if (partnerUser.id === req.user.id) {
-      return res.status(400).json({ message: "You cannot connect with your own share code" });
+    if (partnerUser.user_id === req.user.id) {
+      return res.status(400).json({ message: "You cannot connect with yourself" });
     }
 
-    // 2. Check if already connected
+    // 2. Check if requester is already connected
     const activeLink = await pool.query(
       "SELECT id FROM partners WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active'",
       [req.user.id]
     );
-
     if (activeLink.rows.length > 0) {
       return res.status(400).json({ message: "You are already connected to a partner. Disconnect first." });
     }
 
+    // 3. Check if target partner is already connected
     const partnerActiveLink = await pool.query(
       "SELECT id FROM partners WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active'",
-      [partnerUser.id]
+      [partnerUser.user_id]
     );
-
     if (partnerActiveLink.rows.length > 0) {
-      return res.status(400).json({ message: "The partner is already linked with someone else." });
+      return res.status(400).json({ message: "That user is already linked with someone else." });
     }
 
-    // 3. Create active link
-    const partnerId = crypto.randomUUID();
-    const timestamp = new Date();
-
+    // 4. Create active link
     await pool.query(
-      "INSERT INTO partners (id, user_one_id, user_two_id, connected_at, status) VALUES ($1, $2, $3, $4, 'active')",
-      [partnerId, req.user.id, partnerUser.id, timestamp]
+      "INSERT INTO partners (user_one_id, user_two_id, connected_at, status) VALUES ($1, $2, NOW(), 'active')",
+      [req.user.id, partnerUser.user_id]
     );
 
     res.status(200).json({ success: true, message: `Connected successfully with ${partnerUser.display_name}!` });
@@ -537,8 +562,8 @@ app.post('/partner/connect', authenticateToken, async (req, res) => {
   }
 });
 
-// Endpoint: DELETE /partner/disconnect
-app.delete('/partner/disconnect', authenticateToken, async (req, res) => {
+// Endpoint: DELETE & POST /partner/disconnect (supports both Android & Web client HTTP methods)
+const handleDisconnect = async (req, res) => {
   try {
     const result = await pool.query(
       "UPDATE partners SET status = 'disconnected' WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active'",
@@ -555,7 +580,10 @@ app.delete('/partner/disconnect', authenticateToken, async (req, res) => {
     console.error(err);
     res.status(500).json({ message: "Server error disconnecting partner" });
   }
-});
+};
+app.delete('/partner/disconnect', authenticateToken, handleDisconnect);
+app.post('/partner/disconnect', authenticateToken, handleDisconnect);
+
 
 // Endpoint: POST /api/partner/block
 app.post('/api/partner/block', authenticateToken, async (req, res) => {
@@ -1350,24 +1378,106 @@ app.delete('/api/categories/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// App initialization
+// ─────────────────────────────────────────────────────────────────────────────
+// GROUP EXPENSE & MULTI-PARTY SPLIT ENDPOINTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// POST /api/groups — Create a split group or trip
+app.post('/api/groups', authenticateToken, async (req, res) => {
+  const { name, description, start_date, end_date, currency } = req.body;
+  if (!name) return res.status(400).json({ message: "Group name required" });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const groupRes = await client.query(
+      `INSERT INTO expense_groups (created_by, name, description, start_date, end_date, currency)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [req.user.id, name, description || null, start_date || null, end_date || null, currency || '₹']
+    );
+    const newGroup = groupRes.rows[0];
+
+    // Auto-add creator as a member with role 'creator'
+    await client.query(
+      `INSERT INTO expense_group_members (group_id, user_id, role) VALUES ($1, $2, 'creator')`,
+      [newGroup.id, req.user.id]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json(newGroup);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error setting up group" });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/expenses — Post a complex split transaction
+app.post('/api/expenses', authenticateToken, async (req, res) => {
+  const { group_id, paid_by, category_id, title, amount, expense_date, splits, participants } = req.body;
+  if (!title || !amount) return res.status(400).json({ message: "Title and amount parameters mandatory" });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Insert master expense record
+    const expRes = await client.query(
+      `INSERT INTO expenses (group_id, created_by, paid_by, category_id, title, amount, expense_date)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [group_id || null, req.user.id, paid_by || req.user.id, category_id || null, title, amount, expense_date || new Date()]
+    );
+    const expense = expRes.rows[0];
+
+    // Process registered-user split array if present
+    if (splits && Array.isArray(splits)) {
+      for (const split of splits) {
+        await client.query(
+          `INSERT INTO expense_splits (expense_id, user_id, share_amount, percentage)
+           VALUES ($1, $2, $3, $4)`,
+          [expense.id, split.user_id, split.share_amount, split.percentage || null]
+        );
+      }
+    }
+
+    // Process guest/friend split array if present
+    if (participants && Array.isArray(participants)) {
+      for (const p of participants) {
+        await client.query(
+          `INSERT INTO expense_participants (expense_id, person_name, amount)
+           VALUES ($1, $2, $3)`,
+          [expense.id, p.person_name, p.amount]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    res.status(201).json(expense);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error committing transaction splits" });
+  } finally {
+    client.release();
+  }
+});
+
+// App initialization — bind database connection pool then start server
 if (process.env.DATABASE_URL) {
-  initializeDatabase()
-    .then(() => updateSchema())
+  seedDefaultCategories()
     .then(() => {
       app.listen(PORT, () => {
-        console.log(`TitanBag Sync server is running on port ${PORT}`);
+        console.log(`TitanBag Sync server live on port ${PORT}`);
       });
     })
     .catch(err => {
-      console.error("Failed to start server due to database initialization error:", err);
+      console.error("Database engine boot failure:", err);
       process.exit(1);
     });
 } else {
-  console.warn("WARNING: DATABASE_URL not defined. Running in Demo/Development mode (no DB connections).");
-  app.listen(PORT, () => {
-    console.log(`TitanBag Sync server is running on port ${PORT} (Demo Mode)`);
-  });
+  console.error("Missing database target configuration.");
 }
 
 app.get("/api/info", (req, res) => {
@@ -1380,7 +1490,7 @@ app.get("/api/info", (req, res) => {
       free: `${Math.floor(os.freemem() / 1024 / 1024)} MB`,
       total: `${Math.floor(os.totalmem() / 1024 / 1024)} MB`
     },
-    database: process.env.DATABASE_URL ? "Connected (Neon)" : "Demo Mode (Disconnected)"
+    database: process.env.DATABASE_URL ? "Connected (PostgreSQL)" : "Demo Mode (Disconnected)"
   });
 });
 
