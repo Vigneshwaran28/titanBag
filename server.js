@@ -205,7 +205,7 @@ app.post('/register', async (req, res) => {
         `UPDATE users 
          SET display_name = COALESCE(NULLIF($1, ''), display_name), last_login = $2, updated_at = $3 
          WHERE user_id = $4 
-         RETURNING user_id, username, email, display_name, profile_photo, created_at, updated_at`,
+         RETURNING user_id, username, email, display_name, profile_photo, created_at, updated_at, last_login`,
         [display_name.trim(), timestamp, timestamp, existingUser.user_id]
       );
       const user = updatedResult.rows[0];
@@ -221,7 +221,8 @@ app.post('/register', async (req, res) => {
           display_name: user.display_name,
           partner_share_code: getPartnerShareCode(user.user_id),
           created_at: user.created_at,
-          updated_at: user.updated_at
+          updated_at: user.updated_at,
+          last_login: user.last_login
         }
       });
     }
@@ -231,7 +232,7 @@ app.post('/register', async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO users (username, email, display_name, password_hash, created_at, updated_at, last_login)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING user_id, username, email, display_name, created_at, updated_at`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING user_id, username, email, display_name, created_at, updated_at, last_login`,
       [username.trim().toLowerCase(), email.trim().toLowerCase(), display_name.trim(), passwordHash, timestamp, timestamp, timestamp]
     );
 
@@ -286,7 +287,8 @@ app.post('/register', async (req, res) => {
         display_name: newUser.display_name,
         partner_share_code: getPartnerShareCode(newUser.user_id),
         created_at: newUser.created_at,
-        updated_at: newUser.updated_at
+        updated_at: newUser.updated_at,
+        last_login: newUser.last_login
       }
     });
 
