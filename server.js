@@ -139,7 +139,7 @@ function getPartnerShareCode(userId) {
   const p2 = cleanUuid.substring(4, 8);
   const p3 = cleanUuid.substring(8, 12);
   const p4 = cleanUuid.substring(12, 16);
-  return `EXP-${p1}-${p2}-${p3}-${p4}`;
+  return `PB-${p1}-${p2}-${p3}-${p4}`;
 }
 
 
@@ -199,7 +199,31 @@ app.post('/register', async (req, res) => {
     );
 
     if (duplicateCheck.rows.length > 0) {
-      return res.status(400).json({ message: "Username or Email already registered" });
+      const existingUser = duplicateCheck.rows[0];
+      const timestamp = new Date();
+      const updatedResult = await pool.query(
+        `UPDATE users 
+         SET display_name = COALESCE(NULLIF($1, ''), display_name), last_login = $2, updated_at = $3 
+         WHERE user_id = $4 
+         RETURNING user_id, username, email, display_name, profile_photo, created_at, updated_at`,
+        [display_name.trim(), timestamp, timestamp, existingUser.user_id]
+      );
+      const user = updatedResult.rows[0];
+      await registerDevice(user.user_id, req);
+      const token = jwt.sign({ id: user.user_id, username: user.username }, JWT_SECRET || 'fallback', { expiresIn: '30d' });
+
+      return res.status(200).json({
+        token,
+        user: {
+          id: user.user_id,
+          username: user.username,
+          email: user.email,
+          display_name: user.display_name,
+          partner_share_code: getPartnerShareCode(user.user_id),
+          created_at: user.created_at,
+          updated_at: user.updated_at
+        }
+      });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -507,16 +531,16 @@ app.post('/partner/connect', authenticateToken, async (req, res) => {
     // 1. Find target user by username or derived share code prefix
     let targetResult;
     let cleanCode = partner_code.trim().toUpperCase();
-    if (cleanCode.startsWith('EXP')) {
-      const hexPrefix = cleanCode.substring(3).replace(/-/g, '').toLowerCase() + '%';
+    if (cleanCode.startsWith('EXP') || cleanCode.startsWith('PB')) {
+      const hexPrefix = cleanCode.replace(/^(EXP|PB)-?/i, '').replace(/-/g, '').toLowerCase() + '%';
       targetResult = await pool.query(
-        "SELECT user_id, display_name FROM users WHERE REPLACE(user_id::text, '-', '') LIKE $1",
-        [hexPrefix]
+        "SELECT user_id, display_name FROM users WHERE REPLACE(user_id::text, '-', '') LIKE $1 OR username = $2",
+        [hexPrefix, partner_code.trim().toLowerCase()]
       );
     } else {
       targetResult = await pool.query(
-        "SELECT user_id, display_name FROM users WHERE username = $1",
-        [partner_code.trim().toLowerCase()]
+        "SELECT user_id, display_name FROM users WHERE username = $1 OR REPLACE(user_id::text, '-', '') LIKE $2",
+        [partner_code.trim().toLowerCase(), cleanCode.replace(/-/g, '').toLowerCase() + '%']
       );
     }
 
