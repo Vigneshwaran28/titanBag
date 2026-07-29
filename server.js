@@ -624,9 +624,131 @@ app.post('/api/partner/block', authenticateToken, async (req, res) => {
     res.status(500).json({ message: "Error blocking partner" });
   }
 });
+// Endpoint: GET /partner/status
+// Returns the active partner info for the logged-in user
+app.get('/partner/status', authenticateToken, async (req, res) => {
+  try {
+    const partnerResult = await pool.query(
+      `SELECT p.id, p.user_one_id, p.user_two_id, p.status, p.connected_at,
+              u.display_name as partner_display_name,
+              u.username as partner_username,
+              u.user_id as partner_user_id
+       FROM partners p
+       JOIN users u ON (u.user_id = p.user_one_id OR u.user_id = p.user_two_id) AND u.user_id != $1
+       WHERE (p.user_one_id = $1 OR p.user_two_id = $1) AND p.status = 'active'
+       LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (partnerResult.rows.length === 0) {
+      return res.status(200).json({ connected: false, partner: null });
+    }
+
+    const p = partnerResult.rows[0];
+    res.status(200).json({
+      connected: true,
+      partner: {
+        id: p.partner_user_id,
+        display_name: p.partner_display_name,
+        username: p.partner_username,
+        connected_at: p.connected_at,
+        partner_share_code: getPartnerShareCode(p.partner_user_id)
+      }
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: 'Error fetching partner status' });
+  }
+});
+
+// Endpoint: GET /partner/transactions
+// Returns the partner's journal transactions securely (only if active partner link exists)
+app.get('/partner/transactions', authenticateToken, async (req, res) => {
+  try {
+    // Security: Verify active partner connection first
+    const partnerRes = await pool.query(
+      `SELECT user_one_id, user_two_id FROM partners
+       WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active' LIMIT 1`,
+      [req.user.id]
+    );
+
+    if (partnerRes.rows.length === 0) {
+      return res.status(403).json({ message: 'No active partner connection found. Connect with a partner first.' });
+    }
+
+    const p = partnerRes.rows[0];
+    const partnerId = p.user_one_id === req.user.id ? p.user_two_id : p.user_one_id;
+
+    // Optional date range filters from query params (e.g. ?from=2024-01-01&to=2024-12-31)
+    const { from, to, type, limit = 100 } = req.query;
+
+    let whereClause = 'WHERE j.owner_id = $1';
+    const params = [partnerId];
+    let paramIdx = 2;
+
+    if (from) {
+      whereClause += ` AND j.date >= $${paramIdx++}`;
+      params.push(from);
+    }
+    if (to) {
+      whereClause += ` AND j.date <= $${paramIdx++}`;
+      params.push(to);
+    }
+    if (type && (type === 'income' || type === 'expense')) {
+      whereClause += ` AND j.type = $${paramIdx++}`;
+      params.push(type);
+    }
+    whereClause += ` AND j.deleted = false`;
+
+    const safeLimit = Math.min(parseInt(limit) || 100, 500);
+
+    const txResult = await pool.query(
+      `SELECT j.id, j.owner_id, j.title, j.amount, j.category,
+              j.notes, j.payment_method, j.date, j.created_at, j.updated_at,
+              j.type, j.deleted,
+              u.display_name as owner_display_name
+       FROM journals j
+       JOIN users u ON j.owner_id = u.user_id
+       ${whereClause}
+       ORDER BY j.date DESC
+       LIMIT ${safeLimit}`,
+      params
+    );
+
+    const transactions = txResult.rows.map(row => ({
+      id: row.id,
+      owner_id: row.owner_id,
+      owner_name: row.owner_display_name,
+      title: row.title,
+      amount: parseFloat(row.amount),
+      category: row.category || 'General',
+      notes: row.notes || '',
+      payment_method: row.payment_method || '',
+      type: row.type || 'expense',
+      date: row.date instanceof Date ? row.date.toISOString() : row.date,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at
+    }));
+
+    const totalIncome = transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+    const totalExpense = transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+
+    res.status(200).json({
+      partner_id: partnerId,
+      transaction_count: transactions.length,
+      total_income: totalIncome,
+      total_expense: totalExpense,
+      net_balance: totalIncome - totalExpense,
+      transactions
+    });
+
+  } catch (err) {
+    console.error('Error fetching partner transactions:', err);
+    res.status(500).json({ message: 'Error fetching partner transactions' });
+  }
+});
 
 
-// --- SHARED JOURNALS ENDPOINTS ---
 
 // Create Shared Journal
 app.post('/api/journals', authenticateToken, async (req, res) => {
