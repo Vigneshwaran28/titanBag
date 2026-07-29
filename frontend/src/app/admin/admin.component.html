@@ -60,8 +60,8 @@
       </div>
 
       <!-- Table -->
-      <div class="table-container" *ngIf="!isLoading">
-        <table class="admin-table">
+      <div id="users-table-container" class="table-container" *ngIf="!isLoading">
+        <table id="users-table" class="users-table admin-table" data-testid="users-table">
           <thead>
             <tr>
               <th>Client User</th>
@@ -71,7 +71,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr *ngFor="let user of getFilteredUsers()">
+            <tr *ngFor="let user of getFilteredUsers()" class="user-row" [attr.data-username]="user.username">
               <td class="username-td">&#64;{{ user.username }}</td>
               <td>{{ user.device_manufacturer || 'N/A' }}</td>
               <td class="model-td">{{ user.device_model || 'N/A' }}</td>

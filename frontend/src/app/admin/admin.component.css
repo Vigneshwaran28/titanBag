@@ -210,7 +210,9 @@
   background-color: rgba(7, 9, 14, 0.4);
 }
 
-.admin-table {
+.users-table,
+.admin-table,
+#users-table {
   width: 100%;
   border-collapse: collapse;
   text-align: left;

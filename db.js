@@ -52,7 +52,34 @@ async function seedDefaultCategories() {
   }
 }
 
+// Migration helper: Ensure 'journals' table has 'type' column (income/expense)
+async function ensureTypeColumn() {
+  const client = await pool.connect();
+  try {
+    // Explicitly set schema for this client session
+    await client.query('SET search_path TO piggybag');
+    const res = await client.query(`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_name = 'journals' AND column_name = 'type'
+    `);
+    if (res.rows.length === 0) {
+      console.log("Migration: Adding 'type' column to 'journals' table...");
+      await client.query("ALTER TABLE journals ADD COLUMN type VARCHAR(20) DEFAULT 'expense'");
+      console.log("Migration: 'type' column added successfully.");
+    }
+  } catch (err) {
+    // If table doesn't exist yet, it's fine, it will be handled when sync is called
+    if (err.code !== '42P01') {
+      console.error("Migration error (ensureTypeColumn):", err);
+    }
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   pool,
-  seedDefaultCategories
+  seedDefaultCategories,
+  ensureTypeColumn
 };

@@ -8,7 +8,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const { Resend } = require('resend');
-const { pool, seedDefaultCategories } = require('./db');
+const { pool, seedDefaultCategories, ensureTypeColumn } = require('./db');
 
 const resend = new Resend(process.env.RESEND_MAIL || 're_placeholder_local_testing');
 
@@ -910,9 +910,9 @@ app.post('/sync', authenticateToken, async (req, res) => {
         // Insert new journal if not marked deleted on client
         if (!jr.deleted) {
           await client.query(
-            `INSERT INTO journals (id, owner_id, title, amount, category, notes, payment_method, date, created_at, updated_at, deleted)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-            [jr.id, req.user.id, jr.title, jr.amount, jr.category, jr.notes, jr.payment_method, jr.date, jr.created_at, jr.updated_at, jr.deleted]
+            `INSERT INTO journals (id, owner_id, title, amount, category, notes, payment_method, date, created_at, updated_at, type, deleted)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            [jr.id, req.user.id, jr.title, jr.amount, jr.category, jr.notes, jr.payment_method, jr.date, jr.created_at, jr.updated_at, jr.type || 'expense', jr.deleted]
           );
         }
         syncedIds.push(jr.id);
@@ -927,9 +927,9 @@ app.post('/sync', authenticateToken, async (req, res) => {
           // Client is newer or equal, update server
           await client.query(
             `UPDATE journals 
-             SET title = $1, amount = $2, category = $3, notes = $4, payment_method = $5, date = $6, updated_at = $7, deleted = $8
-             WHERE id = $9`,
-            [jr.title, jr.amount, jr.category, jr.notes, jr.payment_method, jr.date, jr.updated_at, jr.deleted, jr.id]
+             SET title = $1, amount = $2, category = $3, notes = $4, payment_method = $5, date = $6, updated_at = $7, type = $8, deleted = $9
+             WHERE id = $10`,
+            [jr.title, jr.amount, jr.category, jr.notes, jr.payment_method, jr.date, jr.updated_at, jr.type || 'expense', jr.deleted, jr.id]
           );
           syncedIds.push(jr.id);
         } else {
@@ -961,7 +961,7 @@ app.post('/sync', authenticateToken, async (req, res) => {
     }
 
     const journalsResult = await client.query(
-      `SELECT id, owner_id, title, amount, category, notes, payment_method, date, created_at, updated_at, deleted 
+      `SELECT id, owner_id, title, amount, category, notes, payment_method, date, created_at, updated_at, type, deleted
        FROM journals 
        WHERE owner_id = ANY($1::uuid[])`,
       [idsToFetch]
@@ -978,6 +978,7 @@ app.post('/sync', authenticateToken, async (req, res) => {
       date: row.date.toISOString(),
       created_at: row.created_at.toISOString(),
       updated_at: row.updated_at.toISOString(),
+      type: row.type || 'expense',
       deleted: row.deleted
     }));
 
@@ -1614,7 +1615,7 @@ app.post('/api/expenses', authenticateToken, async (req, res) => {
 
 // App initialization — bind database connection pool then start server
 if (process.env.DATABASE_URL) {
-  seedDefaultCategories()
+  Promise.all([seedDefaultCategories(), ensureTypeColumn()])
     .then(() => {
       app.listen(PORT, () => {
         console.log(`TitanBag Sync server live on port ${PORT}`);
