@@ -812,7 +812,7 @@ app.post('/api/journals/join', authenticateToken, async (req, res) => {
 app.get('/api/journals', authenticateToken, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT j.*, m.role,
+      `SELECT DISTINCT j.*, m.role,
        (SELECT count(*) FROM journal_members WHERE journal_id = j.id) as member_count
        FROM shared_journals j
        JOIN journal_members m ON j.id = m.journal_id
