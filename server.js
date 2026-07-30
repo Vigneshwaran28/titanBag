@@ -8,9 +8,10 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { OAuth2Client } = require('google-auth-library');
 const { Resend } = require('resend');
-const { pool, seedDefaultCategories, ensureTypeColumn } = require('./db');
+const { pool, seedDefaultCategories, ensureTypeColumn, ensureGroupSplitColumns } = require('./db');
 
 const resend = new Resend(process.env.RESEND_MAIL || 're_placeholder_local_testing');
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -1533,24 +1534,49 @@ app.delete('/api/categories/:id', authenticateToken, async (req, res) => {
 
 // POST /api/groups — Create a split group or trip
 app.post('/api/groups', authenticateToken, async (req, res) => {
-  const { name, description, start_date, end_date, currency } = req.body;
+  const { id, name, description, start_date, end_date, currency, group_pin } = req.body;
   if (!name) return res.status(400).json({ message: "Group name required" });
+
+  const groupId = id || crypto.randomUUID();
+  const pin = group_pin || Math.floor(100000 + Math.random() * 900000).toString();
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+    
+    // Create the group
     const groupRes = await client.query(
-      `INSERT INTO expense_groups (created_by, name, description, start_date, end_date, currency)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [req.user.id, name, description || null, start_date || null, end_date || null, currency || '₹']
+      `INSERT INTO expense_groups (id, created_by, name, description, start_date, end_date, currency, status, group_pin, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         name = EXCLUDED.name,
+         description = EXCLUDED.description,
+         start_date = EXCLUDED.start_date,
+         end_date = EXCLUDED.end_date,
+         currency = EXCLUDED.currency,
+         updated_at = NOW()
+       RETURNING *`,
+      [groupId, req.user.id, name, description || null, start_date || null, end_date || null, currency || '₹', 'Running', pin]
     );
     const newGroup = groupRes.rows[0];
 
-    // Auto-add creator as a member with role 'creator'
-    await client.query(
-      `INSERT INTO expense_group_members (group_id, user_id, role) VALUES ($1, $2, 'creator')`,
-      [newGroup.id, req.user.id]
+    // Fetch user profile display name
+    const userRes = await client.query("SELECT display_name FROM users WHERE user_id = $1", [req.user.id]);
+    const displayName = userRes.rows[0]?.display_name || "Organizer";
+
+    // Auto-add creator as a member if not already exists
+    const memberCheck = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND user_id = $2",
+      [groupId, req.user.id]
     );
+    if (memberCheck.rows.length === 0) {
+      await client.query(
+        `INSERT INTO expense_group_members (id, group_id, user_id, role, status, joined_at, display_name)
+         VALUES ($1, $2, $3, 'creator', 'active', NOW(), $4)`,
+        [crypto.randomUUID(), groupId, req.user.id, displayName]
+      );
+    }
 
     await client.query('COMMIT');
     res.status(201).json(newGroup);
@@ -1563,51 +1589,385 @@ app.post('/api/groups', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/expenses — Post a complex split transaction
-app.post('/api/expenses', authenticateToken, async (req, res) => {
-  const { group_id, paid_by, category_id, title, amount, expense_date, splits, participants } = req.body;
-  if (!title || !amount) return res.status(400).json({ message: "Title and amount parameters mandatory" });
+// POST /api/groups/join — Join group by PIN code
+app.post('/api/groups/join', authenticateToken, async (req, res) => {
+  const { group_pin } = req.body;
+  if (!group_pin) return res.status(400).json({ message: "Group PIN required" });
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
 
-    // Insert master expense record
-    const expRes = await client.query(
-      `INSERT INTO expenses (group_id, created_by, paid_by, category_id, title, amount, expense_date)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [group_id || null, req.user.id, paid_by || req.user.id, category_id || null, title, amount, expense_date || new Date()]
+    // Find group
+    const groupRes = await client.query(
+      "SELECT * FROM expense_groups WHERE TRIM(group_pin) = TRIM($1) LIMIT 1",
+      [group_pin]
     );
-    const expense = expRes.rows[0];
+    if (groupRes.rows.length === 0) {
+      return res.status(404).json({ message: "Group not found with this PIN." });
+    }
+    const group = groupRes.rows[0];
 
-    // Process registered-user split array if present
-    if (splits && Array.isArray(splits)) {
-      for (const split of splits) {
-        await client.query(
-          `INSERT INTO expense_splits (expense_id, user_id, share_amount, percentage)
-           VALUES ($1, $2, $3, $4)`,
-          [expense.id, split.user_id, split.share_amount, split.percentage || null]
-        );
-      }
+    // Check if already finalized
+    if (group.status === 'Completed' || group.status === 'Finalized' || group.status === 'Archived') {
+      return res.status(400).json({ message: "Cannot join: This group is finalized and locked." });
     }
 
-    // Process guest/friend split array if present
-    if (participants && Array.isArray(participants)) {
-      for (const p of participants) {
+    // Check if user is already a member
+    const memberCheck = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND user_id = $2",
+      [group.id, req.user.id]
+    );
+    if (memberCheck.rows.length > 0) {
+      await client.query('COMMIT');
+      return res.json({ success: true, message: "Already joined", group });
+    }
+
+    // Enforce 12-member limit
+    const countRes = await client.query(
+      "SELECT COUNT(*) as count FROM expense_group_members WHERE group_id = $1",
+      [group.id]
+    );
+    const memberCount = parseInt(countRes.rows[0].count, 10);
+    if (memberCount >= 12) {
+      return res.status(400).json({ message: "Cannot join: This group is full (maximum 12 members allowed)." });
+    }
+
+    // Fetch user details
+    const userRes = await client.query("SELECT display_name FROM users WHERE user_id = $1", [req.user.id]);
+    const displayName = userRes.rows[0]?.display_name || "Guest";
+
+    // Insert new member
+    await client.query(
+      `INSERT INTO expense_group_members (id, group_id, user_id, role, status, joined_at, display_name)
+       VALUES ($1, $2, $3, 'member', 'active', NOW(), $4)`,
+      [crypto.randomUUID(), group.id, req.user.id, displayName]
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: `Joined group split: ${group.name}!`, group });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error joining group split" });
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/groups — List all groups user belongs to
+app.get('/api/groups', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT g.*,
+       (SELECT COUNT(*) FROM expense_group_members WHERE group_id = g.id) as member_count
+       FROM expense_groups g
+       JOIN expense_group_members m ON g.id = m.group_id
+       WHERE m.user_id = $1
+       ORDER BY g.created_at DESC`,
+      [req.user.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching group splits" });
+  }
+});
+
+// GET /api/groups/:id — Get details of a single group split
+app.get('/api/groups/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+  try {
+    await client.query('SET search_path TO piggybag');
+    // Verify membership
+    const memberCheck = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: "Access denied: Not a member of this group." });
+    }
+
+    const groupRes = await client.query("SELECT * FROM expense_groups WHERE id = $1", [id]);
+    const membersRes = await client.query("SELECT * FROM expense_group_members WHERE group_id = $1 ORDER BY display_name ASC", [id]);
+    const expensesRes = await client.query(
+      `SELECT e.*, m.display_name as memberName
+       FROM expenses e
+       LEFT JOIN expense_group_members m ON e.group_id = m.group_id AND e.paid_by = m.user_id
+       WHERE e.group_id = $1 ORDER BY e.expense_date DESC`,
+      [id]
+    );
+    const settlementsRes = await client.query("SELECT * FROM settlements WHERE group_id = $1 ORDER BY settlement_date DESC", [id]);
+
+    res.json({
+      group: groupRes.rows[0],
+      members: membersRes.rows.map(m => ({
+        id: m.id,
+        groupId: m.group_id,
+        userId: m.user_id,
+        displayName: m.display_name,
+        joinedDate: m.joined_at
+      })),
+      expenses: expensesRes.rows.map(e => ({
+        id: e.id,
+        groupId: e.group_id,
+        userId: e.paid_by,
+        amount: parseFloat(e.amount),
+        description: e.title,
+        expenseDate: e.expense_date,
+        createdAt: e.created_at,
+        memberName: e.memberName || "Unknown",
+        participantsIncluded: e.participants_included || "",
+        splitType: e.split_type || "Equal",
+        shares: e.shares || ""
+      })),
+      settlements: settlementsRes.rows.map(s => ({
+        id: s.id,
+        groupId: s.group_id,
+        fromUserId: s.from_user,
+        fromUserName: s.from_user_name,
+        toUserId: s.to_user,
+        toUserName: s.to_user_name,
+        amount: parseFloat(s.amount),
+        status: s.status || "Pending"
+      }))
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching group split details" });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/groups/:id/members — Add custom guest member or sync member
+app.post('/api/groups/:id/members', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { id: memberId, userId, displayName, joinedDate } = req.body;
+
+  if (!memberId || !displayName) return res.status(400).json({ message: "Member ID and Display Name required" });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+
+    // Verify membership
+    const memberCheck = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Enforce 12-member limit
+    const countRes = await client.query(
+      "SELECT COUNT(*) as count FROM expense_group_members WHERE group_id = $1",
+      [id]
+    );
+    const memberCount = parseInt(countRes.rows[0].count, 10);
+    
+    // Check if member already exists
+    const existingRes = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND (id = $2 OR (user_id IS NOT NULL AND user_id = $3))",
+      [id, memberId, userId || null]
+    );
+
+    if (existingRes.rows.length === 0 && memberCount >= 12) {
+      return res.status(400).json({ message: "Group is full (maximum 12 members allowed)." });
+    }
+
+    const mUserId = userId || crypto.randomUUID();
+    const joined = joinedDate || new Date();
+
+    await client.query(
+      `INSERT INTO expense_group_members (id, group_id, user_id, role, status, joined_at, display_name)
+       VALUES ($1, $2, $3, 'guest', 'active', $4, $5)
+       ON CONFLICT (id) DO UPDATE SET
+         display_name = EXCLUDED.display_name,
+         joined_at = EXCLUDED.joined_at`,
+      [memberId, id, mUserId, joined, displayName]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json({ success: true, message: "Member synced successfully" });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error syncing group member" });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/groups/:id/expenses — Add/Update/Delete group expense
+app.post('/api/groups/:id/expenses', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { id: expenseId, amount, description, expenseDate, paidByUserId, splitType, participantsIncluded, shares, deleted } = req.body;
+
+  if (!expenseId) return res.status(400).json({ message: "Expense ID is required" });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+
+    // Verify membership
+    const memberCheck = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    if (deleted) {
+      await client.query("DELETE FROM expenses WHERE id = $1", [expenseId]);
+      await client.query('COMMIT');
+      return res.json({ success: true, message: "Expense deleted" });
+    }
+
+    const payer = paidByUserId || req.user.id;
+    const date = expenseDate || new Date();
+
+    const insertRes = await client.query(
+      `INSERT INTO expenses (id, group_id, created_by, paid_by, title, amount, expense_date, split_type, participants_included, shares, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         paid_by = EXCLUDED.paid_by,
+         title = EXCLUDED.title,
+         amount = EXCLUDED.amount,
+         expense_date = EXCLUDED.expense_date,
+         split_type = EXCLUDED.split_type,
+         participants_included = EXCLUDED.participants_included,
+         shares = EXCLUDED.shares,
+         updated_at = NOW()
+       RETURNING *`,
+      [expenseId, id, req.user.id, payer, description, amount, date, splitType, participantsIncluded, shares]
+    );
+
+    await client.query('COMMIT');
+    res.status(201).json(insertRes.rows[0]);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error syncing group expense" });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/groups/:id/finalize — Finalize group report & save settlements
+app.post('/api/groups/:id/finalize', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { settlements } = req.body; // Array of Settlement DTOs
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+
+    // Verify creator status
+    const groupRes = await client.query("SELECT created_by FROM expense_groups WHERE id = $1", [id]);
+    if (groupRes.rows.length === 0) return res.status(404).json({ message: "Group not found" });
+    if (groupRes.rows[0].created_by !== req.user.id) {
+      return res.status(403).json({ message: "Only the group creator can finalize the split report." });
+    }
+
+    // Update group status
+    await client.query("UPDATE expense_groups SET status = 'Completed', updated_at = NOW() WHERE id = $1", [id]);
+
+    // Clear and insert settlements
+    await client.query("DELETE FROM settlements WHERE group_id = $1", [id]);
+
+    if (settlements && Array.isArray(settlements)) {
+      for (const s of settlements) {
         await client.query(
-          `INSERT INTO expense_participants (expense_id, person_name, amount)
-           VALUES ($1, $2, $3)`,
-          [expense.id, p.person_name, p.amount]
+          `INSERT INTO settlements (id, group_id, from_user, to_user, amount, status, from_user_name, to_user_name, settlement_date, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+          [s.id || crypto.randomUUID(), id, s.fromUserId, s.toUserId, s.amount, s.status || 'Pending', s.fromUserName, s.toUserName]
         );
       }
     }
 
     await client.query('COMMIT');
-    res.status(201).json(expense);
+    res.json({ success: true, message: "Group splits finalized successfully!" });
   } catch (err) {
     await client.query('ROLLBACK');
     console.error(err);
-    res.status(500).json({ message: "Error committing transaction splits" });
+    res.status(500).json({ message: "Error finalizing group splits" });
+  } finally {
+    client.release();
+  }
+});
+
+// POST /api/groups/:id/reopen — Reopen finalized group split
+app.post('/api/groups/:id/reopen', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+
+    // Verify creator status
+    const groupRes = await client.query("SELECT created_by FROM expense_groups WHERE id = $1", [id]);
+    if (groupRes.rows.length === 0) return res.status(404).json({ message: "Group not found" });
+    if (groupRes.rows[0].created_by !== req.user.id) {
+      return res.status(403).json({ message: "Only the group creator can reopen this group split." });
+    }
+
+    // Update group status to Running and delete settlements
+    await client.query("UPDATE expense_groups SET status = 'Running', updated_at = NOW() WHERE id = $1", [id]);
+    await client.query("DELETE FROM settlements WHERE group_id = $1", [id]);
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: "Group reopened successfully!" });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error reopening group split" });
+  } finally {
+    client.release();
+  }
+});
+
+// PUT /api/groups/:id/settlements/:settlementId — Update settlement payment status
+app.put('/api/groups/:id/settlements/:settlementId', authenticateToken, async (req, res) => {
+  const { id, settlementId } = req.params;
+  const { status } = req.body;
+
+  if (!status) return res.status(400).json({ message: "Status required" });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+
+    // Verify membership of active user in group
+    const memberCheck = await client.query(
+      "SELECT id FROM expense_group_members WHERE group_id = $1 AND user_id = $2",
+      [id, req.user.id]
+    );
+    if (memberCheck.rows.length === 0) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    // Update settlement
+    await client.query(
+      "UPDATE settlements SET status = $1 WHERE id = $2 AND group_id = $3",
+      [status, settlementId, id]
+    );
+
+    await client.query('COMMIT');
+    res.json({ success: true, message: `Settlement status updated to ${status}!` });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ message: "Error updating settlement payment status" });
   } finally {
     client.release();
   }
@@ -1615,7 +1975,7 @@ app.post('/api/expenses', authenticateToken, async (req, res) => {
 
 // App initialization — bind database connection pool then start server
 if (process.env.DATABASE_URL) {
-  Promise.all([seedDefaultCategories(), ensureTypeColumn()])
+  Promise.all([seedDefaultCategories(), ensureTypeColumn(), ensureGroupSplitColumns()])
     .then(() => {
       app.listen(PORT, () => {
         console.log(`TitanBag Sync server live on port ${PORT}`);

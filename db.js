@@ -78,8 +78,39 @@ async function ensureTypeColumn() {
   }
 }
 
+// Migration helper: Ensure group splits columns exist
+async function ensureGroupSplitColumns() {
+  const client = await pool.connect();
+  try {
+    await client.query('SET search_path TO piggybag');
+    
+    // Add group_pin to expense_groups
+    await client.query(`ALTER TABLE expense_groups ADD COLUMN IF NOT EXISTS group_pin VARCHAR(50)`);
+    
+    // Add display_name to expense_group_members
+    await client.query(`ALTER TABLE expense_group_members ADD COLUMN IF NOT EXISTS display_name VARCHAR(255)`);
+    
+    // Add split_type, participants_included, shares to expenses
+    await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS split_type VARCHAR(50) DEFAULT 'Equal'`);
+    await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS participants_included TEXT`);
+    await client.query(`ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shares TEXT`);
+    
+    // Add status, from_user_name, to_user_name to settlements
+    await client.query(`ALTER TABLE settlements ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'Pending'`);
+    await client.query(`ALTER TABLE settlements ADD COLUMN IF NOT EXISTS from_user_name VARCHAR(255)`);
+    await client.query(`ALTER TABLE settlements ADD COLUMN IF NOT EXISTS to_user_name VARCHAR(255)`);
+    
+    console.log("Migration: Group split columns verified/added successfully.");
+  } catch (err) {
+    console.error("Migration error (ensureGroupSplitColumns):", err);
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   pool,
   seedDefaultCategories,
-  ensureTypeColumn
+  ensureTypeColumn,
+  ensureGroupSplitColumns
 };
