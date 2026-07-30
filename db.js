@@ -100,7 +100,42 @@ async function ensureGroupSplitColumns() {
     await client.query(`ALTER TABLE settlements ADD COLUMN IF NOT EXISTS from_user_name VARCHAR(255)`);
     await client.query(`ALTER TABLE settlements ADD COLUMN IF NOT EXISTS to_user_name VARCHAR(255)`);
     
-    console.log("Migration: Group split columns verified/added successfully.");
+    // Add password_recoveries table
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS password_recoveries (
+        id UUID PRIMARY KEY,
+        request_user_id UUID NOT NULL,
+        partner_id UUID NOT NULL,
+        code_hash VARCHAR(255),
+        expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+        used BOOLEAN DEFAULT FALSE,
+        status VARCHAR(50) DEFAULT 'Pending',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Add notifications table for transient notifications and push simulation
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id UUID PRIMARY KEY,
+        user_id UUID NOT NULL,
+        title VARCHAR(255) NOT NULL,
+        message TEXT NOT NULL,
+        destination VARCHAR(255),
+        read BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Create performance indexes
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_group_members_group ON expense_group_members(group_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_group_members_user ON expense_group_members(user_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_expenses_group ON expenses(group_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_settlements_group ON settlements(group_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_partners_users ON partners(user_one_id, user_two_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications(user_id) WHERE read = false`);
+
+    console.log("Migration: Group split, security tables & performance indexes verified/added successfully.");
   } catch (err) {
     console.error("Migration error (ensureGroupSplitColumns):", err);
   } finally {

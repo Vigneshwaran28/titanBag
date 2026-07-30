@@ -581,6 +581,9 @@ app.post('/partner/connect', authenticateToken, async (req, res) => {
       [req.user.id, partnerUser.user_id]
     );
 
+    const requesterName = req.user.displayName || req.user.username || "Someone";
+    await sendNotification(partnerUser.user_id, "Partner Connected", `${requesterName} has connected with you as a partner!`, "partner_sharing");
+
     res.status(200).json({ success: true, message: `Connected successfully with ${partnerUser.display_name}!` });
 
   } catch (err) {
@@ -592,6 +595,12 @@ app.post('/partner/connect', authenticateToken, async (req, res) => {
 // Endpoint: DELETE & POST /partner/disconnect (supports both Android & Web client HTTP methods)
 const handleDisconnect = async (req, res) => {
   try {
+    const partnerRes = await pool.query(
+      `SELECT user_one_id, user_two_id FROM partners
+       WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active' LIMIT 1`,
+      [req.user.id]
+    );
+
     const result = await pool.query(
       "UPDATE partners SET status = 'disconnected' WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active'",
       [req.user.id]
@@ -599,6 +608,13 @@ const handleDisconnect = async (req, res) => {
 
     if (result.rowCount === 0) {
       return res.status(400).json({ message: "No active partner connection found" });
+    }
+
+    if (partnerRes.rows.length > 0) {
+      const p = partnerRes.rows[0];
+      const partnerId = p.user_one_id === req.user.id ? p.user_two_id : p.user_one_id;
+      const requesterName = req.user.displayName || req.user.username || "Someone";
+      await sendNotification(partnerId, "Partner Disconnected", `${requesterName} disconnected the partner link.`, "partner_sharing");
     }
 
     res.status(200).json({ success: true, message: "Partner disconnected successfully. Data is no longer shared." });
@@ -1645,6 +1661,20 @@ app.post('/api/groups/join', authenticateToken, async (req, res) => {
       [crypto.randomUUID(), group.id, req.user.id, displayName]
     );
 
+    // Notify other group members
+    const otherMembers = await client.query(
+      "SELECT user_id FROM expense_group_members WHERE group_id = $1 AND user_id != $2",
+      [group.id, req.user.id]
+    );
+    for (const member of otherMembers.rows) {
+      await sendNotification(
+        member.user_id,
+        "New Member Joined",
+        `${displayName} joined your group "${group.name}".`,
+        "group_expense"
+      );
+    }
+
     await client.query('COMMIT');
     res.json({ success: true, message: `Joined group split: ${group.name}!`, group });
   } catch (err) {
@@ -1783,6 +1813,17 @@ app.post('/api/groups/:id/members', authenticateToken, async (req, res) => {
     const mUserId = userId || crypto.randomUUID();
     const joined = joinedDate || new Date();
 
+    // Satisfy foreign key constraint: auto-create shadow user in users table if not exists
+    const userExistRes = await client.query("SELECT user_id FROM users WHERE user_id = $1", [mUserId]);
+    if (userExistRes.rows.length === 0) {
+      const cleanUsername = `guest_${memberId.substring(0, 8)}_${Date.now().toString().slice(-4)}`;
+      await client.query(
+        `INSERT INTO users (user_id, username, email, display_name, password_hash, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, 'GUEST_USER', NOW(), NOW())`,
+        [mUserId, cleanUsername, `${mUserId.substring(0, 8)}@guest.local`, displayName]
+      );
+    }
+
     await client.query(
       `INSERT INTO expense_group_members (id, group_id, user_id, role, status, joined_at, display_name)
        VALUES ($1, $2, $3, 'guest', 'active', $4, $5)
@@ -1825,13 +1866,34 @@ app.post('/api/groups/:id/expenses', authenticateToken, async (req, res) => {
     }
 
     if (deleted) {
+      const groupNameRes = await client.query("SELECT name FROM expense_groups WHERE id = $1", [id]);
+      const groupName = groupNameRes.rows[0]?.name || "Group";
+
       await client.query("DELETE FROM expenses WHERE id = $1", [expenseId]);
+
+      // Notify other members
+      const otherMembers = await client.query("SELECT user_id FROM expense_group_members WHERE group_id = $1 AND user_id != $2", [id, req.user.id]);
+      for (const member of otherMembers.rows) {
+        await sendNotification(
+          member.user_id,
+          "Expense Deleted",
+          `${req.user.display_name || req.user.username} deleted an expense in "${groupName}".`,
+          "group_expense"
+        );
+      }
+
       await client.query('COMMIT');
       return res.json({ success: true, message: "Expense deleted" });
     }
 
     const payer = paidByUserId || req.user.id;
     const date = expenseDate || new Date();
+
+    const groupNameRes = await client.query("SELECT name FROM expense_groups WHERE id = $1", [id]);
+    const groupName = groupNameRes.rows[0]?.name || "Group";
+
+    const existCheck = await client.query("SELECT id FROM expenses WHERE id = $1", [expenseId]);
+    const action = existCheck.rows.length > 0 ? "updated" : "added";
 
     const insertRes = await client.query(
       `INSERT INTO expenses (id, group_id, created_by, paid_by, title, amount, expense_date, split_type, participants_included, shares, created_at, updated_at)
@@ -1848,6 +1910,17 @@ app.post('/api/groups/:id/expenses', authenticateToken, async (req, res) => {
        RETURNING *`,
       [expenseId, id, req.user.id, payer, description, amount, date, splitType, participantsIncluded, shares]
     );
+
+    // Notify other members
+    const otherMembers = await client.query("SELECT user_id FROM expense_group_members WHERE group_id = $1 AND user_id != $2", [id, req.user.id]);
+    for (const member of otherMembers.rows) {
+      await sendNotification(
+        member.user_id,
+        "Expense Update",
+        `${req.user.display_name || req.user.username} ${action} expense "${description}" for ₹${parseFloat(amount).toFixed(2)} in "${groupName}".`,
+        "group_expense"
+      );
+    }
 
     await client.query('COMMIT');
     res.status(201).json(insertRes.rows[0]);
@@ -1893,6 +1966,18 @@ app.post('/api/groups/:id/finalize', authenticateToken, async (req, res) => {
       }
     }
 
+    // Notify other group members
+    const groupName = groupRes.rows[0]?.name || "Group";
+    const otherMembers = await client.query("SELECT user_id FROM expense_group_members WHERE group_id = $1 AND user_id != $2", [id, req.user.id]);
+    for (const member of otherMembers.rows) {
+      await sendNotification(
+        member.user_id,
+        "Group Finalized",
+        `The group "${groupName}" splits have been finalized by the creator. Check your settlements!`,
+        "group_expense"
+      );
+    }
+
     await client.query('COMMIT');
     res.json({ success: true, message: "Group splits finalized successfully!" });
   } catch (err) {
@@ -1923,6 +2008,18 @@ app.post('/api/groups/:id/reopen', authenticateToken, async (req, res) => {
     // Update group status to Running and delete settlements
     await client.query("UPDATE expense_groups SET status = 'Running', updated_at = NOW() WHERE id = $1", [id]);
     await client.query("DELETE FROM settlements WHERE group_id = $1", [id]);
+
+    // Notify other group members
+    const groupName = groupRes.rows[0]?.name || "Group";
+    const otherMembers = await client.query("SELECT user_id FROM expense_group_members WHERE group_id = $1 AND user_id != $2", [id, req.user.id]);
+    for (const member of otherMembers.rows) {
+      await sendNotification(
+        member.user_id,
+        "Group Reopened",
+        `The group "${groupName}" splits have been reopened.`,
+        "group_expense"
+      );
+    }
 
     await client.query('COMMIT');
     res.json({ success: true, message: "Group reopened successfully!" });
@@ -1956,11 +2053,30 @@ app.put('/api/groups/:id/settlements/:settlementId', authenticateToken, async (r
       return res.status(403).json({ message: "Access denied" });
     }
 
+    // Fetch settlement details to notify the partner user of payment updates
+    const sDetails = await client.query("SELECT from_user, to_user, amount, from_user_name, to_user_name FROM settlements WHERE id = $1", [settlementId]);
+
     // Update settlement
     await client.query(
       "UPDATE settlements SET status = $1 WHERE id = $2 AND group_id = $3",
       [status, settlementId, id]
     );
+
+    if (sDetails.rows.length > 0) {
+      const s = sDetails.rows[0];
+      const notifyUser = req.user.id === s.from_user ? s.to_user : s.from_user;
+      const displayAmount = parseFloat(s.amount).toFixed(2);
+      
+      const groupDetails = await client.query("SELECT name FROM expense_groups WHERE id = $1", [id]);
+      const groupName = groupDetails.rows[0]?.name || "Group";
+      
+      await sendNotification(
+        notifyUser,
+        "Settlement Paid Update",
+        `Settlement of ₹${displayAmount} from ${s.from_user_name} to ${s.to_user_name} has been marked as "${status}" in "${groupName}".`,
+        "group_expense"
+      );
+    }
 
     await client.query('COMMIT');
     res.json({ success: true, message: `Settlement status updated to ${status}!` });
@@ -2080,6 +2196,242 @@ app.post('/api/god/test-email', authenticateGodToken, async (req, res) => {
   } catch (err) {
     console.error("Test email send failed:", err);
     res.status(500).json({ success: false, message: err.message || "Failed to send test email" });
+  }
+});
+
+// Helper to send a notification (saves in postgres)
+async function sendNotification(userId, title, message, destination) {
+  try {
+    const id = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO piggybag.notifications (id, user_id, title, message, destination, read, created_at)
+       VALUES ($1, $2, $3, $4, $5, false, NOW())`,
+      [id, userId, title, message, destination || null]
+    );
+    console.log(`Notification inserted for ${userId}: ${title}`);
+  } catch (err) {
+    console.error("Failed to insert notification:", err);
+  }
+}
+
+// Endpoint: GET /api/notifications
+// Retrieves unread notifications and marks them as read
+app.get('/api/notifications', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SET search_path TO piggybag');
+    
+    const result = await client.query(
+      `SELECT id, title, message, destination, created_at 
+       FROM notifications 
+       WHERE user_id = $1 AND read = false 
+       ORDER BY created_at ASC`,
+      [req.user.id]
+    );
+    
+    if (result.rows.length > 0) {
+      const ids = result.rows.map(r => r.id);
+      await client.query(
+        `UPDATE notifications SET read = true WHERE id = ANY($1::uuid[])`,
+        [ids]
+      );
+    }
+    
+    await client.query('COMMIT');
+    res.json({ notifications: result.rows });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error("Error retrieving notifications:", err);
+    res.status(500).json({ message: "Error retrieving notifications" });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint: POST /api/security/recovery/request
+// Initiate recovery from connected partner
+app.post('/api/security/recovery/request', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('SET search_path TO piggybag');
+    
+    // Find connected partner
+    const partnerRes = await client.query(
+      `SELECT user_one_id, user_two_id FROM partners
+       WHERE (user_one_id = $1 OR user_two_id = $1) AND status = 'active' LIMIT 1`,
+      [req.user.id]
+    );
+    
+    if (partnerRes.rows.length === 0) {
+      return res.status(400).json({ message: "Recovery is only available if a partner account is connected." });
+    }
+    
+    const p = partnerRes.rows[0];
+    const partnerId = p.user_one_id === req.user.id ? p.user_two_id : p.user_one_id;
+    
+    // Generate secure random 6 digit code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+    
+    // Delete older requests
+    await client.query(
+      "DELETE FROM password_recoveries WHERE request_user_id = $1",
+      [req.user.id]
+    );
+    
+    const requestId = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+    
+    await client.query(
+      `INSERT INTO password_recoveries (id, request_user_id, partner_id, code_hash, expires_at, used, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, false, 'Pending', NOW())`,
+      [requestId, req.user.id, partnerId, codeHash, expiresAt]
+    );
+    
+    // Fetch requester display name
+    const userRes = await client.query("SELECT display_name FROM users WHERE user_id = $1", [req.user.id]);
+    const requesterName = userRes.rows[0]?.display_name || "Your partner";
+    
+    // Send transient notification to partner containing the code (Method 1) and request (Method 2)
+    await sendNotification(
+      partnerId,
+      "App Lock Recovery Request",
+      `${requesterName} has requested App Lock recovery. Code: ${code}`,
+      "partner_sharing"
+    );
+    
+    res.json({ success: true, message: "Recovery request generated successfully. Ask your partner for code." });
+  } catch (err) {
+    console.error("Error generating recovery request:", err);
+    res.status(500).json({ message: "Server error generating recovery request" });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint: GET /api/security/recovery/status
+// Poll request status (Method 2: partner approval check)
+app.get('/api/security/recovery/status', authenticateToken, async (req, res) => {
+  try {
+    const resu = await pool.query(
+      `SELECT status FROM piggybag.password_recoveries 
+       WHERE request_user_id = $1 AND used = false AND expires_at > NOW() 
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.user.id]
+    );
+    const approved = resu.rows.length > 0 && resu.rows[0].status === 'Approved';
+    res.json({ approved });
+  } catch (err) {
+    console.error("Error checking recovery status:", err);
+    res.status(500).json({ message: "Error checking recovery status" });
+  }
+});
+
+// Endpoint: POST /api/security/recovery/verify-code
+// Verify the entered 6-digit code (Method 1)
+app.post('/api/security/recovery/verify-code', authenticateToken, async (req, res) => {
+  const { code } = req.body;
+  if (!code) {
+    return res.status(400).json({ message: "Recovery code is required" });
+  }
+  
+  const client = await pool.connect();
+  try {
+    await client.query('SET search_path TO piggybag');
+    
+    const requestRes = await client.query(
+      `SELECT id, code_hash FROM password_recoveries 
+       WHERE request_user_id = $1 AND used = false AND expires_at > NOW() 
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.user.id]
+    );
+    
+    if (requestRes.rows.length === 0) {
+      return res.status(400).json({ message: "No active recovery request found or code expired." });
+    }
+    
+    const request = requestRes.rows[0];
+    const inputHash = crypto.createHash('sha256').update(code.trim()).digest('hex');
+    
+    if (inputHash !== request.code_hash) {
+      return res.status(400).json({ message: "Incorrect verification code." });
+    }
+    
+    // Mark as approved & verified
+    await client.query(
+      "UPDATE password_recoveries SET status = 'Approved' WHERE id = $1",
+      [request.id]
+    );
+    
+    res.json({ success: true, message: "Code verified successfully." });
+  } catch (err) {
+    console.error("Error verifying recovery code:", err);
+    res.status(500).json({ message: "Server error verifying code" });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint: POST /api/security/recovery/approve
+// Partner approves the recovery request (Method 2)
+app.post('/api/security/recovery/approve', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await client.query('SET search_path TO piggybag');
+    
+    // Find active pending request where req.user.id is the partner
+    const pendingRequest = await client.query(
+      `SELECT id, request_user_id FROM password_recoveries 
+       WHERE partner_id = $1 AND status = 'Pending' AND expires_at > NOW() 
+       ORDER BY created_at DESC LIMIT 1`,
+      [req.user.id]
+    );
+    
+    if (pendingRequest.rows.length === 0) {
+      return res.status(404).json({ message: "No pending recovery requests found." });
+    }
+    
+    const request = pendingRequest.rows[0];
+    await client.query(
+      "UPDATE password_recoveries SET status = 'Approved' WHERE id = $1",
+      [request.id]
+    );
+    
+    // Notify requesting user
+    await sendNotification(
+      request.request_user_id,
+      "Recovery Request Approved",
+      "Your partner approved your App Lock reset request. You may now create a new lock credential.",
+      "partner_sharing"
+    );
+    
+    res.json({ success: true, message: "Recovery request approved successfully." });
+  } catch (err) {
+    console.error("Error approving recovery request:", err);
+    res.status(500).json({ message: "Server error approving request" });
+  } finally {
+    client.release();
+  }
+});
+
+// Endpoint: POST /api/security/recovery/reset-lock
+// Reset and consume the request
+app.post('/api/security/recovery/reset-lock', authenticateToken, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE piggybag.password_recoveries 
+       SET used = true 
+       WHERE request_user_id = $1 AND status = 'Approved' AND used = false AND expires_at > NOW()`,
+      [req.user.id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(400).json({ message: "No approved and active reset request found." });
+    }
+    res.json({ success: true, message: "Reset permission consumed." });
+  } catch (err) {
+    console.error("Error resetting lock:", err);
+    res.status(500).json({ message: "Error resetting lock" });
   }
 });
 
